@@ -1,0 +1,9 @@
+termobulator -- Notices and Attributions
+Copyright 2026 The Termobulator Authors
+
+This software utilizes libtsm (Terminal-emulator State Machine), which
+is dually licensed under the MIT License and the GNU Lesser General
+Public License, version 2.1 (LGPLv2.1).
+
+You can find the source code and licensing terms for libtsm at:
+https://github.com/Aetf/libtsm
