@@ -13,17 +13,18 @@ set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}")
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
 find_package(Threads REQUIRED)
+find_package(nlohmann_json REQUIRED)
 
 add_library(libtermobulator SHARED termobulator.cc termobulator.h)
 set_target_properties(libtermobulator PROPERTIES
     OUTPUT_NAME termobulator
-    VERSION 1.0.0
+    VERSION 1.1.0
     SOVERSION 1
 )
 target_link_libraries(libtermobulator PRIVATE tsm Threads::Threads)
 
-add_executable(termobulator main.cc)
-target_link_libraries(termobulator PRIVATE libtermobulator Threads::Threads)
+add_executable(termobulator main.cc app_utils.cc app_utils.h interactive_cli.cc interactive_cli.h mcp_server.cc mcp_server.h)
+target_link_libraries(termobulator PRIVATE libtermobulator Threads::Threads nlohmann_json::nlohmann_json)
 
 # Testing Support
 enable_testing()
@@ -33,6 +34,7 @@ target_link_libraries(test_terminal PRIVATE libtermobulator Threads::Threads)
 
 add_test(NAME unit_test COMMAND test_terminal)
 add_test(NAME integration_test COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration_test.py)
+add_test(NAME mcp_integration_test COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mcp.py)
 
 # Installation Rules
 include(GNUInstallDirs)
@@ -55,7 +57,7 @@ install(EXPORT termobulatorTargets
 # CPack Debian Packaging Configuration
 set(CPACK_GENERATOR "DEB")
 set(CPACK_PACKAGE_NAME "termobulator")
-set(CPACK_PACKAGE_VERSION "1.0.0")
+set(CPACK_PACKAGE_VERSION "1.1.0")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Headless terminal emulator driver and testing framework")
 set(CPACK_PACKAGE_VENDOR "Termobulator Authors")
 set(CPACK_PACKAGE_CONTACT "Termobulator Maintainer <termobulator@gmail.com>")

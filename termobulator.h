@@ -8,6 +8,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace termobulator {
@@ -85,7 +86,7 @@ class Terminal {
   public:
     virtual ~Terminal() = default;
 
-    virtual void SendRawBytes(const std::string &bytes) = 0;
+    virtual void SendRawBytes(std::string_view bytes) = 0;
     // snapshot_id == -1 means current screen state (not a stored snapshot).
     virtual std::string DumpScreen(int snapshot_id) = 0;
     std::string DumpScreen() { return DumpScreen(-1); }
@@ -106,11 +107,11 @@ class Terminal {
                                 unsigned int deadline_ms) = 0;
 
     // Static utilities
-    static uint32_t ParseKeysym(const std::string &name);
+    static uint32_t ParseKeysym(std::string_view name);
     static std::vector<std::string> GetKeysyms();
     static unsigned int ParseMods(const std::vector<std::string> &mod_args,
                                   size_t start_idx = 0);
-    static std::string ParseEscapes(const std::string &input);
+    static std::string ParseEscapes(std::string_view input);
 };
 
 // Factory functions

@@ -12,11 +12,13 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <stdexcept>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -85,7 +87,7 @@ class TerminalBase : public Terminal {
     TerminalBase(unsigned int width, unsigned int height);
     ~TerminalBase() override;
 
-    void SendRawBytes(const std::string &bytes) override;
+    void SendRawBytes(std::string_view bytes) override;
     std::string DumpScreen(int snapshot_id) override;
     int Snapshot() override;
     ScreenSnapshot GetSnapshot(int snapshot_id) override;
@@ -156,7 +158,7 @@ void TerminalBase::FeedInput(const char *data, size_t len) {
     tsm_vte_input(vte_, data, len);
 }
 
-void TerminalBase::SendRawBytes(const std::string &bytes) {
+void TerminalBase::SendRawBytes(std::string_view bytes) {
     int fd = master_fd_.load();
     if (fd >= 0) {
         WriteAll(fd, bytes.data(), bytes.size());
@@ -220,9 +222,9 @@ int TerminalBase::DrawCb(struct tsm_screen *con, uint64_t id,
         s = " ";
     } else {
         for (size_t i = 0; i < len; ++i) {
-            char buf[8];
-            size_t bytes = tsm_ucs4_to_utf8(ch[i], buf);
-            if (bytes > 0 && bytes < 8) s.append(buf, bytes);
+            std::array<char, 8> buf;
+            size_t bytes = tsm_ucs4_to_utf8(ch[i], buf.data());
+            if (bytes > 0 && bytes < buf.size()) s.append(buf.data(), bytes);
         }
     }
     unsigned int base_idx = posy * draw_data->width + posx;
@@ -237,16 +239,15 @@ int TerminalBase::DrawCb(struct tsm_screen *con, uint64_t id,
 }
 
 ScreenSnapshot TerminalBase::CaptureCurrent() {
-    ScreenSnapshot snap;
-    snap.width = tsm_screen_get_width(screen_);
-    snap.height = tsm_screen_get_height(screen_);
-    snap.cursor_x = tsm_screen_get_cursor_x(screen_);
-    snap.cursor_y = tsm_screen_get_cursor_y(screen_);
-    snap.cursor_hidden =
-        (tsm_screen_get_flags(screen_) & TSM_SCREEN_HIDE_CURSOR) != 0;
-
-    CellAttr default_attr{};
-    snap.cells.assign(snap.width * snap.height, Cell{" ", default_attr});
+    unsigned int w = tsm_screen_get_width(screen_);
+    unsigned int h = tsm_screen_get_height(screen_);
+    ScreenSnapshot snap{
+        w,
+        h,
+        tsm_screen_get_cursor_x(screen_),
+        tsm_screen_get_cursor_y(screen_),
+        (tsm_screen_get_flags(screen_) & TSM_SCREEN_HIDE_CURSOR) != 0,
+        std::vector<Cell>(w * h, Cell{" ", CellAttr{}})};
 
     DrawData draw_data{snap.width, snap.height, snap.cells};
     tsm_screen_draw(screen_, DrawCb, &draw_data);
@@ -330,7 +331,7 @@ unsigned int TerminalBase::Height() const {
     return tsm_screen_get_height(screen_);
 }
 
-std::string Terminal::ParseEscapes(const std::string &input) {
+std::string Terminal::ParseEscapes(std::string_view input) {
     std::string res;
     for (size_t i = 0; i < input.length(); ++i) {
         if (input[i] == '\\' && i + 1 < input.length()) {
@@ -348,7 +349,7 @@ std::string Terminal::ParseEscapes(const std::string &input) {
                 res += '\\';
                 i++;
             } else if (next == 'x' && i + 3 <= input.length()) {
-                std::string hex_str = input.substr(i + 2, 2);
+                std::string hex_str(input.substr(i + 2, 2));
                 try {
                     int val = std::stoi(hex_str, nullptr, 16);
                     res += static_cast<char>(val);
@@ -357,7 +358,7 @@ std::string Terminal::ParseEscapes(const std::string &input) {
                 }
                 i += 3;
             } else if (next >= '0' && next <= '7' && i + 3 <= input.length()) {
-                std::string oct_str = input.substr(i + 1, 3);
+                std::string oct_str(input.substr(i + 1, 3));
                 try {
                     int val = std::stoi(oct_str, nullptr, 8);
                     res += static_cast<char>(val);
@@ -428,18 +429,17 @@ static const std::unordered_map<std::string, uint32_t> &GetKeysymMap() {
     return kKeys;
 }
 
-uint32_t Terminal::ParseKeysym(const std::string &name) {
+uint32_t Terminal::ParseKeysym(std::string_view name) {
     if (name.length() == 1) {
         return static_cast<uint32_t>(name[0]);
     }
 
-    std::string lower_name = name;
+    std::string lower_name(name);
     std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(),
                    ::tolower);
 
     const auto &kKeys = GetKeysymMap();
-    auto it = kKeys.find(lower_name);
-    if (it != kKeys.end()) {
+    if (auto it = kKeys.find(lower_name); it != kKeys.end()) {
         return it->second;
     }
 
@@ -549,15 +549,15 @@ SubprocessTerminalImpl::SubprocessTerminalImpl(
     last_update_time_ = std::chrono::steady_clock::now();
 
     reader_thread_ = std::thread([this]() {
-        char buf[1024];
+        std::array<char, 1024> buf;
         while (true) {
             int fd = master_fd_.load();
             if (fd < 0) break;
-            ssize_t n = read(fd, buf, sizeof(buf));
+            ssize_t n = read(fd, buf.data(), buf.size());
             if (n <= 0) {
                 break;
             }
-            FeedInput(buf, n);
+            FeedInput(buf.data(), n);
             {
                 std::lock_guard<std::mutex> lock(pty_update_mutex_);
                 last_update_time_ = std::chrono::steady_clock::now();
@@ -649,15 +649,15 @@ ThreadTerminalImpl::ThreadTerminalImpl(unsigned int width, unsigned int height,
     pthread_sigmask(SIG_BLOCK, &set, &old_set);
 
     reader_thread_ = std::thread([this]() {
-        char buf[1024];
+        std::array<char, 1024> buf;
         while (!stop_requested_) {
             int fd = master_fd_.load();
             if (fd < 0) break;
-            ssize_t n = read(fd, buf, sizeof(buf));
+            ssize_t n = read(fd, buf.data(), buf.size());
             if (n <= 0) {
                 break;
             }
-            FeedInput(buf, n);
+            FeedInput(buf.data(), n);
             {
                 std::lock_guard<std::mutex> lock(pty_update_mutex_);
                 last_update_time_ = std::chrono::steady_clock::now();
