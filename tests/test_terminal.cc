@@ -1,0 +1,345 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Termobulator Authors.
+
+#include <signal.h>
+#include <termios.h>
+#include <unistd.h>
+
+#include <atomic>
+#include <cassert>
+#include <chrono>
+#include <condition_variable>
+#include <iostream>
+#include <mutex>
+#include <string>
+#include <thread>
+
+#include "../termobulator.h"
+
+using termobulator::unstable::CreateSubprocessTerminal;
+using termobulator::unstable::CreateThreadTerminal;
+using termobulator::unstable::ScreenSnapshot;
+
+void TestBasicRendering() {
+    auto term = CreateThreadTerminal(80, 24, []() {
+        ssize_t w = write(STDOUT_FILENO, "Hello", 5);
+        (void)w;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    });
+    term->WaitIdle(20, 200);
+    ScreenSnapshot snap = term->GetSnapshot();
+    assert(snap.width == 80);
+    assert(snap.height == 24);
+    assert(snap.cells[0].ch == "H");
+    assert(snap.cells[4].ch == "o");
+    assert(snap.cells[5].ch == " ");
+    assert(snap.cursor_x == 5);
+    assert(snap.cursor_y == 0);
+    std::cout << "test_basic_rendering passed\n";
+}
+
+void TestScreenAttributes() {
+    auto term = CreateThreadTerminal(80, 24, []() {
+        ssize_t w = write(STDOUT_FILENO, "\033[1;31mRedBold\033[0m", 17);
+        (void)w;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    });
+    term->WaitIdle(20, 200);
+    ScreenSnapshot snap = term->GetSnapshot();
+    assert(snap.cells[0].ch == "R");
+    assert(snap.cells[0].attr.bold);
+    assert(snap.cells[0].attr.fccode == 1);
+
+    assert(snap.cells[7].ch == " ");
+    assert(snap.cells[7].attr.bold == 0);
+    std::cout << "test_screen_attributes passed\n";
+}
+
+void TestPtyWrite() {
+    std::atomic<bool> key_received{false};
+    auto term = CreateThreadTerminal(80, 24, [&key_received]() {
+        struct termios tio;
+        if (tcgetattr(STDIN_FILENO, &tio) == 0) {
+            tio.c_lflag &= ~(ICANON | ECHO);
+            tcsetattr(STDIN_FILENO, TCSANOW, &tio);
+        }
+
+        char buf[32];
+        ssize_t n = read(STDIN_FILENO, buf, sizeof(buf));
+        if (n > 0) {
+            std::string s(buf, n);
+            if (s == "\033[A" || s == "\033OA") {
+                key_received = true;
+            }
+        }
+    });
+
+    term->SendKey(0xff52);  // Send Up Key
+
+    auto start = std::chrono::steady_clock::now();
+    while (!key_received && std::chrono::steady_clock::now() - start <
+                                std::chrono::seconds(2)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    assert(key_received);
+    std::cout << "test_pty_write passed\n";
+}
+
+void TestSnapshots() {
+    std::atomic<int> step{0};
+    std::mutex m;
+    std::condition_variable cv;
+
+    auto term = CreateThreadTerminal(80, 24, [&step, &m, &cv]() {
+        ssize_t w1 = write(STDOUT_FILENO, "First", 5);
+        (void)w1;
+        {
+            std::lock_guard<std::mutex> lk(m);
+            step = 1;
+        }
+        cv.notify_one();
+
+        {
+            std::unique_lock<std::mutex> lk(m);
+            cv.wait(lk, [&step]() { return step == 2; });
+        }
+
+        ssize_t w2 = write(STDOUT_FILENO, " Second", 7);
+        (void)w2;
+        {
+            std::lock_guard<std::mutex> lk(m);
+            step = 3;
+        }
+        cv.notify_one();
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    });
+
+    {
+        std::unique_lock<std::mutex> lk(m);
+        cv.wait(lk, [&step]() { return step == 1; });
+    }
+    term->WaitIdle(20, 200);
+
+    int id1 = term->Snapshot();
+    assert(id1 == 0);
+
+    {
+        std::lock_guard<std::mutex> lk(m);
+        step = 2;
+    }
+    cv.notify_one();
+
+    {
+        std::unique_lock<std::mutex> lk(m);
+        cv.wait(lk, [&step]() { return step == 3; });
+    }
+    term->WaitIdle(20, 200);
+
+    int id2 = term->Snapshot();
+    assert(id2 == 1);
+
+    ScreenSnapshot snap1 = term->GetSnapshot(id1);
+    assert(snap1.cells[0].ch == "F");
+    assert(snap1.cells[5].ch == " ");
+
+    ScreenSnapshot snap2 = term->GetSnapshot(id2);
+    assert(snap2.cells[0].ch == "F");
+    assert(snap2.cells[5].ch == " ");
+    assert(snap2.cells[6].ch == "S");
+    std::cout << "test_snapshots passed\n";
+}
+
+void TestPtyTerminalThread() {
+    auto pty_term = CreateThreadTerminal(80, 24, []() {
+        ssize_t w1 = write(STDOUT_FILENO, "READY", 5);
+        (void)w1;
+        char c;
+        if (read(STDIN_FILENO, &c, 1) == 1) {
+            if (c == 'q') {
+                ssize_t w2 = write(STDOUT_FILENO, "BYE", 3);
+                (void)w2;
+            } else {
+                ssize_t w3 = write(STDOUT_FILENO, "ERR", 3);
+                (void)w3;
+            }
+        }
+    });
+
+    pty_term->WaitIdle(20, 200);
+
+    ScreenSnapshot snap = pty_term->GetSnapshot();
+    assert(snap.cells[0].ch == "R");
+    assert(snap.cells[1].ch == "E");
+    assert(snap.cells[2].ch == "A");
+    assert(snap.cells[3].ch == "D");
+    assert(snap.cells[4].ch == "Y");
+
+    pty_term->SendRawBytes("q\n");
+
+    auto start = std::chrono::steady_clock::now();
+    while (!pty_term->IsExited() && std::chrono::steady_clock::now() - start <
+                                        std::chrono::seconds(2)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    assert(pty_term->IsExited());
+
+    pty_term->WaitIdle(10, 100);
+
+    snap = pty_term->GetSnapshot();
+    std::cout << "Screen:\n" << pty_term->DumpScreen() << "\n";
+    assert(snap.cells[1 * snap.width + 0].ch == "B");
+    assert(snap.cells[1 * snap.width + 1].ch == "Y");
+    assert(snap.cells[1 * snap.width + 2].ch == "E");
+
+    std::cout << "test_pty_terminal_thread passed\n";
+}
+
+static std::atomic<bool> g_sigwinch_received{false};
+
+static void HandleSigwinch(int sig) {
+    if (sig == SIGWINCH) {
+        g_sigwinch_received = true;
+    }
+}
+
+void TestResize() {
+    g_sigwinch_received = false;
+    auto term = CreateThreadTerminal(80, 24, []() {
+        struct sigaction sa, old_sa;
+        sa.sa_handler = HandleSigwinch;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = 0;
+        sigaction(SIGWINCH, &sa, &old_sa);
+
+        ssize_t w = write(STDOUT_FILENO, "READY", 5);
+        (void)w;
+
+        for (int i = 0; i < 200; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            if (g_sigwinch_received) {
+                break;
+            }
+        }
+        sigaction(SIGWINCH, &old_sa, nullptr);
+    });
+
+    term->WaitIdle(20, 200);
+
+    {
+        ScreenSnapshot snap = term->GetSnapshot();
+        assert(snap.width == 80);
+        assert(snap.height == 24);
+    }
+
+    term->Resize(100, 30);
+
+    auto start = std::chrono::steady_clock::now();
+    while (!g_sigwinch_received && std::chrono::steady_clock::now() - start <
+                                       std::chrono::seconds(2)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    assert(g_sigwinch_received);
+
+    ScreenSnapshot snap = term->GetSnapshot();
+    assert(snap.width == 100);
+    assert(snap.height == 30);
+
+    std::cout << "test_resize passed\n";
+}
+
+void TestKeysymSpace() {
+    uint32_t val = termobulator::unstable::Terminal::ParseKeysym("space");
+    assert(val == 0x0020);
+
+    auto keysyms = termobulator::unstable::Terminal::GetKeysyms();
+    assert(!keysyms.empty());
+    for (size_t i = 1; i < keysyms.size(); ++i) {
+        assert(keysyms[i - 1] <= keysyms[i]);
+    }
+    bool has_space = false;
+    for (const auto& k : keysyms) {
+        if (k == "space") has_space = true;
+    }
+    assert(has_space);
+
+    std::cout << "test_keysym_space passed\n";
+}
+
+void TestWaitIdleResults() {
+    // 1. Idle case
+    {
+        auto term = CreateThreadTerminal(80, 24, []() {
+            ssize_t w = write(STDOUT_FILENO, "READY", 5);
+            (void)w;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        });
+        termobulator::unstable::WaitResult res = term->WaitIdle(10, 200);
+        assert(res == termobulator::unstable::WaitResult::kIdle);
+    }
+    // 2. Deadline case
+    {
+        auto term = CreateThreadTerminal(80, 24, []() {
+            for (int i = 0; i < 50; ++i) {
+                ssize_t w = write(STDOUT_FILENO, "READY", 5);
+                (void)w;
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+        });
+        termobulator::unstable::WaitResult res = term->WaitIdle(50, 100);
+        assert(res == termobulator::unstable::WaitResult::kDeadline);
+    }
+    // 3. Exited case
+    {
+        auto term = CreateThreadTerminal(80, 24, []() {
+            ssize_t w = write(STDOUT_FILENO, "READY", 5);
+            (void)w;
+        });
+        termobulator::unstable::WaitResult res = term->WaitIdle(10, 2000);
+        assert(res == termobulator::unstable::WaitResult::kExited);
+    }
+    std::cout << "test_wait_idle_results passed\n";
+}
+
+void TestSubprocessEnv() {
+    auto term = CreateSubprocessTerminal(
+        80, 24, "sh", {"-c", "echo \"$TERM:$LC_ALL:$LANG\""}, "myterm",
+        "en_US.UTF-8");
+    term->WaitIdle(20, 2000);
+    ScreenSnapshot snap = term->GetSnapshot();
+    std::string line;
+    for (unsigned int x = 0; x < snap.width; ++x) {
+        std::string ch = snap.cells[x].ch;
+        if (ch == " ") break;
+        line += ch;
+    }
+    std::cout << "Subprocess output: " << line << "\n";
+    assert(line.find("myterm") != std::string::npos);
+    assert(line.find("en_US.UTF-8") != std::string::npos);
+    std::cout << "test_subprocess_env passed\n";
+}
+
+int main() {
+    std::cout << "Starting test_basic_rendering...\n" << std::flush;
+    TestBasicRendering();
+    std::cout << "Starting test_screen_attributes...\n" << std::flush;
+    TestScreenAttributes();
+    std::cout << "Starting test_pty_write...\n" << std::flush;
+    TestPtyWrite();
+    std::cout << "Starting test_snapshots...\n" << std::flush;
+    TestSnapshots();
+    std::cout << "Starting test_pty_terminal_thread...\n" << std::flush;
+    TestPtyTerminalThread();
+    std::cout << "Starting test_resize...\n" << std::flush;
+    TestResize();
+    std::cout << "Starting test_keysym_space...\n" << std::flush;
+    TestKeysymSpace();
+    std::cout << "Starting test_wait_idle_results...\n" << std::flush;
+    TestWaitIdleResults();
+    std::cout << "Starting test_subprocess_env...\n" << std::flush;
+    TestSubprocessEnv();
+    std::cout << "All Terminal unit tests passed successfully!\n"
+              << std::flush;
+    return 0;
+}
