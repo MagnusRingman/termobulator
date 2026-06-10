@@ -108,6 +108,9 @@ void InteractiveCli::SetupCommands() {
     commands_["screen"] = {
         [this](const std::string& arg) { return HandleScreen(arg); },
         "  screen [snapshot_id]\n    Dump full snapshot contents to stdout."};
+    commands_["scrollback"] = {
+        [this](const std::string& arg) { return HandleScrollback(arg); },
+        "  scrollback <lines>\n    Retrieve the last <lines> of scrollback."};
     commands_["screen-raw"] = {
         [this](const std::string& arg) { return HandleScreenRaw(arg); },
         "  screen-raw [snapshot_id]\n    Dump screen contents row by row "
@@ -549,6 +552,24 @@ bool InteractiveCli::HandleResize(const std::string& arg) {
     std::cout << "Resized to " << w << "x" << h << ".\n";
     std::cout << "Warning: Existing snapshots taken before this resize have "
                  "incompatible dimensions.\n";
+    return true;
+}
+
+bool InteractiveCli::HandleScrollback(const std::string& arg) {
+    auto args = app_utils::ParseArgs(arg);
+    if (args.empty()) {
+        std::cerr << "Usage: scrollback <lines>\n";
+        return true;
+    }
+    int lines = app_utils::ParseInt(args[0], "lines");
+    if (lines <= 0) {
+        std::cerr << "Lines must be positive.\n";
+        return true;
+    }
+    std::vector<std::string> sb = term_->GetScrollback(lines);
+    for (const auto& line : sb) {
+        std::cout << line << "\n";
+    }
     return true;
 }
 

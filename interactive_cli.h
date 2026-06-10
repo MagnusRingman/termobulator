@@ -53,6 +53,7 @@ class InteractiveCli {
     bool HandleWait(const std::string& arg);
     bool HandleWaitForText(const std::string& arg);
     bool HandleScreenRaw(const std::string& arg);
+    bool HandleScrollback(const std::string& arg);
 
     unsigned int width_;
     unsigned int height_;

@@ -3,6 +3,8 @@
 
 #include "mcp_server.h"
 
+#include <unistd.h>
+
 #include <chrono>
 #include <iostream>
 #include <stdexcept>
@@ -19,16 +21,54 @@ using termobulator::unstable::ScreenSnapshot;
 using termobulator::unstable::Terminal;
 
 McpServer::McpServer(unsigned int width, unsigned int height,
-                     const std::string& term_type, const std::string& locale)
+                     const std::string& term_type, const std::string& locale,
+                     unsigned int idle_timeout_sec, bool do_log)
         : width_(width),
           height_(height),
           term_type_(term_type),
-          locale_(locale) {}
+          locale_(locale),
+          do_log_(do_log),
+          idle_timeout_sec_(idle_timeout_sec) {}
 
 int McpServer::Run() {
+    if (do_log_) {
+        std::string log_path =
+            "/tmp/termobulator-" + std::to_string(getpid()) + ".log";
+        log_file_.open(log_path);
+    }
+    stop_idle_check_ = false;
+    idle_check_thread_ = std::thread([this]() {
+        while (!stop_idle_check_) {
+            std::unique_lock<std::mutex> lock(sessions_mutex_);
+            // Wait up to 1 second or until stopped for faster responsiveness
+            // and test speed
+            idle_check_cv_.wait_for(lock, std::chrono::seconds(1), [this]() {
+                return stop_idle_check_.load();
+            });
+            if (stop_idle_check_) break;
+
+            auto now = std::chrono::steady_clock::now();
+            std::vector<std::string> sessions_to_close;
+            for (const auto& pair : sessions_last_activity_) {
+                auto elapsed =
+                    std::chrono::duration_cast<std::chrono::seconds>(
+                        now - pair.second)
+                        .count();
+                if (elapsed >= idle_timeout_sec_) {
+                    sessions_to_close.push_back(pair.first);
+                }
+            }
+
+            for (const auto& sess_id : sessions_to_close) {
+                CloseSessionInternal(sess_id);
+            }
+        }
+    });
+
     std::string line;
     while (std::getline(std::cin, line)) {
         if (line.empty()) continue;
+        WriteLog("RECV", line);
         try {
             json req = json::parse(line);
             ProcessMcpMessage(req);
@@ -37,7 +77,22 @@ int McpServer::Run() {
                              std::string("Parse error: ") + e.what());
         }
     }
+
+    {
+        std::lock_guard<std::mutex> lock(sessions_mutex_);
+        stop_idle_check_ = true;
+        idle_check_cv_.notify_all();
+    }
+    if (idle_check_thread_.joinable()) {
+        idle_check_thread_.join();
+    }
+
+    if (log_file_.is_open()) {
+        log_file_.close();
+    }
+
     // Return the exit status of the first created session, if any.
+    std::lock_guard<std::mutex> lock(sessions_mutex_);
     if (!first_session_id_.empty()) {
         auto it = sessions_.find(first_session_id_);
         if (it != sessions_.end()) {
@@ -48,6 +103,20 @@ int McpServer::Run() {
     return 0;
 }
 
+void McpServer::SendJson(const json& resp) {
+    std::string s = resp.dump();
+    std::cout << s << std::endl;
+    WriteLog("SEND", s);
+}
+
+void McpServer::WriteLog(std::string_view direction,
+                         const std::string& message) {
+    if (do_log_ && log_file_.is_open()) {
+        log_file_ << "[" << direction << "] " << message << "\n";
+        log_file_.flush();
+    }
+}
+
 void McpServer::SendJsonRpcError(const json& id, int code,
                                  const std::string& message) {
     json resp;
@@ -55,7 +124,7 @@ void McpServer::SendJsonRpcError(const json& id, int code,
     resp["id"] = id.is_null() ? json(nullptr) : id;
     resp["error"]["code"] = code;
     resp["error"]["message"] = message;
-    std::cout << resp.dump() << std::endl;
+    SendJson(resp);
 }
 
 void McpServer::ProcessMcpMessage(const json& msg) {
@@ -113,7 +182,7 @@ void McpServer::HandleInitialize(const json& id, const json& req) {
     resp["result"]["capabilities"]["tools"] = json::object();
     resp["result"]["serverInfo"]["name"] = "termobulator";
     resp["result"]["serverInfo"]["version"] = "1.1.0";
-    std::cout << resp.dump() << std::endl;
+    SendJson(resp);
 }
 
 void McpServer::HandleInitialized(const json& req) {
@@ -122,7 +191,9 @@ void McpServer::HandleInitialized(const json& req) {
     }
 }
 
-Terminal* McpServer::GetTargetSession(const json& args) {
+std::shared_ptr<termobulator::unstable::Terminal> McpServer::GetTargetSession(
+    const json& args) {
+    std::lock_guard<std::mutex> lock(sessions_mutex_);
     std::string sess_id;
     if (args.contains("session_id")) {
         sess_id = args.at("session_id").get<std::string>();
@@ -131,12 +202,32 @@ Terminal* McpServer::GetTargetSession(const json& args) {
     }
     if (sess_id.empty()) {
         throw std::runtime_error(
-            "No active session. Please create a session first.");
+            "No active session. Please create a session using create_session "
+            "first.");
     }
     if (auto it = sessions_.find(sess_id); it == sessions_.end()) {
         throw std::runtime_error("Session not found: " + sess_id);
     } else {
-        return it->second.get();
+        sessions_last_activity_[sess_id] = std::chrono::steady_clock::now();
+        return it->second;
+    }
+}
+
+void McpServer::CloseSessionInternal(const std::string& sess_id) {
+    auto it = sessions_.find(sess_id);
+    if (it != sessions_.end()) {
+        if (sess_id == first_session_id_) {
+            first_session_exit_code_ = it->second->ExitStatus();
+        }
+        sessions_.erase(it);
+        sessions_last_activity_.erase(sess_id);
+    }
+    if (active_session_id_ == sess_id) {
+        if (!sessions_.empty()) {
+            active_session_id_ = sessions_.begin()->first;
+        } else {
+            active_session_id_ = "";
+        }
     }
 }
 
@@ -298,6 +389,11 @@ const std::vector<McpServer::Tool>& McpServer::GetTools() {
              "snapshot. Always use `take_snapshot` first and pass the same "
              "`snapshot_id` to both the listing call and the range-query "
              "call."}}},
+          {"include_ranges",
+           {{"type", "boolean"},
+            {"description",
+             "Optional boolean (default false). If true, include the per-row "
+             "ranges where each attribute is active on the screen."}}},
           {"session_id",
            {{"type", "string"},
             {"description",
@@ -313,6 +409,9 @@ const std::vector<McpServer::Tool>& McpServer::GetTools() {
              int snap_id = args.contains("snapshot_id")
                                ? args["snapshot_id"].get<int>()
                                : -1;
+             bool include_ranges = args.contains("include_ranges")
+                                       ? args["include_ranges"].get<bool>()
+                                       : false;
              ScreenSnapshot snap =
                  server->GetTargetSession(args)->GetSnapshot(snap_id);
              std::string out;
@@ -356,6 +455,38 @@ const std::vector<McpServer::Tool>& McpServer::GetTools() {
                  for (size_t i = 0; i < unique_attrs.size(); ++i) {
                      out += std::to_string(i) + ": " +
                             app_utils::FormatAttr(unique_attrs[i]) + "\n";
+                     if (include_ranges) {
+                         CellAttr target_attr = unique_attrs[i];
+                         for (unsigned int y = 0; y < snap.height; ++y) {
+                             std::vector<std::string> ranges;
+                             unsigned int cx = 0;
+                             while (cx < snap.width) {
+                                 if (snap.cells[y * snap.width + cx].attr ==
+                                     target_attr) {
+                                     unsigned int x_start = cx;
+                                     while (cx < snap.width &&
+                                            snap.cells[y * snap.width + cx]
+                                                    .attr == target_attr) {
+                                         cx++;
+                                     }
+                                     ranges.push_back(std::to_string(x_start) +
+                                                      "-" +
+                                                      std::to_string(cx - 1));
+                                 } else {
+                                     cx++;
+                                 }
+                             }
+                             if (!ranges.empty()) {
+                                 out +=
+                                     "  row " + std::to_string(y) + ": col ";
+                                 for (size_t r = 0; r < ranges.size(); ++r) {
+                                     if (r > 0) out += ", ";
+                                     out += ranges[r];
+                                 }
+                                 out += "\n";
+                             }
+                         }
+                     }
                  }
              }
              return {{"content",
@@ -438,7 +569,7 @@ const std::vector<McpServer::Tool>& McpServer::GetTools() {
          [](McpServer* server, const json& args) -> json {
              int sig =
                  args.contains("signal") ? args["signal"].get<int>() : 15;
-             Terminal* t = server->GetTargetSession(args);
+             auto t = server->GetTargetSession(args);
              if (t->IsExited()) {
                  throw std::runtime_error("Process already exited.");
              } else {
@@ -459,7 +590,7 @@ const std::vector<McpServer::Tool>& McpServer::GetTools() {
          {},
          [](McpServer* server, const json& args) -> json {
              std::string status_str;
-             Terminal* t = server->GetTargetSession(args);
+             auto t = server->GetTargetSession(args);
              if (t->IsExited()) {
                  status_str = "exited " + std::to_string(t->ExitStatus());
              } else {
@@ -496,7 +627,7 @@ const std::vector<McpServer::Tool>& McpServer::GetTools() {
              if (quiet_ms < 0 || deadline_ms < 0) {
                  throw std::runtime_error("Times must be non-negative.");
              }
-             Terminal* t = server->GetTargetSession(args);
+             auto t = server->GetTargetSession(args);
              termobulator::unstable::WaitResult wait_res =
                  t->WaitIdle(quiet_ms, deadline_ms);
              std::string result_str;
@@ -540,13 +671,13 @@ const std::vector<McpServer::Tool>& McpServer::GetTools() {
                  throw std::runtime_error("Deadline must be non-negative.");
              }
 
-             Terminal* t = server->GetTargetSession(args);
+             auto t = server->GetTargetSession(args);
              auto start_time = std::chrono::steady_clock::now();
              auto d_dur = std::chrono::milliseconds(deadline_ms);
              std::string result_str = "wait-for-text: timeout";
 
              while (true) {
-                 if (app_utils::IsTextOnScreen(t, query)) {
+                 if (app_utils::IsTextOnScreen(t.get(), query)) {
                      result_str = "wait-for-text: found";
                      break;
                  }
@@ -669,7 +800,7 @@ const std::vector<McpServer::Tool>& McpServer::GetTools() {
              int snap_b = args.contains("snapshot_id_b")
                               ? args["snapshot_id_b"].get<int>()
                               : -1;
-             Terminal* t = server->GetTargetSession(args);
+             auto t = server->GetTargetSession(args);
              ScreenSnapshot curr = t->GetSnapshot(snap_b);
              ScreenSnapshot prev = t->GetSnapshot(snap_a);
 
@@ -772,7 +903,20 @@ const std::vector<McpServer::Tool>& McpServer::GetTools() {
            {{"type", "string"},
             {"description",
              "Optional locale setting (e.g. \"en_US.UTF-8\", default: locale "
-             "specified at server start)."}}}},
+             "specified at server start)."}}},
+          {"disable_alternate_screen",
+           {{"type", "boolean"},
+            {"description",
+             "Optional boolean to disable switching to the terminal's "
+             "alternate "
+             "screen buffer. This helps capture scrollback history for "
+             "curses/TUI "
+             "applications."}}},
+          {"scrollback_size",
+           {{"type", "integer"},
+            {"description",
+             "Optional maximum number of scrollback lines to retain (default: "
+             "200)."}}}},
          {"binary"},
          [](McpServer* server, const json& args) -> json {
              if (!args.contains("binary"))
@@ -790,33 +934,51 @@ const std::vector<McpServer::Tool>& McpServer::GetTools() {
                                   ? args["height"].get<unsigned int>()
                                   : server->height_;
              std::string sess_id;
-             if (args.contains("session_id")) {
-                 sess_id = args["session_id"].get<std::string>();
-                 if (server->sessions_.count(sess_id) > 0) {
-                     throw std::runtime_error("Session ID already exists: " +
-                                              sess_id);
-                 }
-             } else {
-                 sess_id = "session_" +
-                           std::to_string(server->next_session_number_++);
-                 while (server->sessions_.count(sess_id) > 0) {
-                     sess_id = "session_" +
-                               std::to_string(server->next_session_number_++);
-                 }
-             }
+             unsigned int sb_size =
+                 args.contains("scrollback_size")
+                     ? args["scrollback_size"].get<unsigned int>()
+                     : 200;
+             bool disable_alt =
+                 args.contains("disable_alternate_screen")
+                     ? args["disable_alternate_screen"].get<bool>()
+                     : false;
              std::string term = args.contains("terminal")
                                     ? args["terminal"].get<std::string>()
                                     : server->term_type_;
              std::string loc = args.contains("locale")
                                    ? args["locale"].get<std::string>()
                                    : server->locale_;
-             server->sessions_[sess_id] =
-                 CreateSubprocessTerminal(w, h, binary, cmd_args, term, loc);
-             if (server->first_session_id_.empty()) {
-                 server->first_session_id_ = sess_id;
-             }
-             if (server->active_session_id_.empty()) {
-                 server->active_session_id_ = sess_id;
+             std::shared_ptr<termobulator::unstable::Terminal> term_obj =
+                 CreateSubprocessTerminal(w, h, binary, cmd_args, term, loc,
+                                          sb_size);
+             term_obj->SetDisableAlternateScreen(disable_alt);
+
+             {
+                 std::lock_guard<std::mutex> lock(server->sessions_mutex_);
+                 if (args.contains("session_id")) {
+                     sess_id = args["session_id"].get<std::string>();
+                     if (server->sessions_.count(sess_id) > 0) {
+                         throw std::runtime_error(
+                             "Session ID already exists: " + sess_id);
+                     }
+                 } else {
+                     sess_id = "session_" +
+                               std::to_string(server->next_session_number_++);
+                     while (server->sessions_.count(sess_id) > 0) {
+                         sess_id =
+                             "session_" +
+                             std::to_string(server->next_session_number_++);
+                     }
+                 }
+                 server->sessions_[sess_id] = std::move(term_obj);
+                 server->sessions_last_activity_[sess_id] =
+                     std::chrono::steady_clock::now();
+                 if (server->first_session_id_.empty()) {
+                     server->first_session_id_ = sess_id;
+                 }
+                 if (server->active_session_id_.empty()) {
+                     server->active_session_id_ = sess_id;
+                 }
              }
              json response_json = {{"session_id", sess_id}};
              return {
@@ -835,24 +997,11 @@ const std::vector<McpServer::Tool>& McpServer::GetTools() {
                      "Missing required parameter: session_id");
              }
              std::string sess_id = args.at("session_id").get<std::string>();
-             auto it = server->sessions_.find(sess_id);
-             if (it == server->sessions_.end()) {
+             std::lock_guard<std::mutex> lock(server->sessions_mutex_);
+             if (server->sessions_.count(sess_id) == 0) {
                  throw std::runtime_error("Session not found: " + sess_id);
-             } else {
-                 if (sess_id == server->first_session_id_) {
-                     server->first_session_exit_code_ =
-                         it->second->ExitStatus();
-                 }
-                 server->sessions_.erase(it);
              }
-             if (server->active_session_id_ == sess_id) {
-                 if (!server->sessions_.empty()) {
-                     server->active_session_id_ =
-                         server->sessions_.begin()->first;
-                 } else {
-                     server->active_session_id_ = "";
-                 }
-             }
+             server->CloseSessionInternal(sess_id);
              return {{"content",
                       json::array(
                           {{{"type", "text"}, {"text", "Session closed."}}})}};
@@ -862,6 +1011,7 @@ const std::vector<McpServer::Tool>& McpServer::GetTools() {
          {},
          {},
          [](McpServer* server, const json& args) -> json {
+             std::lock_guard<std::mutex> lock(server->sessions_mutex_);
              json session_list = json::array();
              for (const auto& pair : server->sessions_) {
                  json item;
@@ -888,14 +1038,204 @@ const std::vector<McpServer::Tool>& McpServer::GetTools() {
                      "Missing required parameter: session_id");
              }
              std::string sess_id = args.at("session_id").get<std::string>();
+             std::lock_guard<std::mutex> lock(server->sessions_mutex_);
              if (server->sessions_.count(sess_id) == 0) {
                  throw std::runtime_error("Session not found: " + sess_id);
              }
              server->active_session_id_ = sess_id;
+             server->sessions_last_activity_[sess_id] =
+                 std::chrono::steady_clock::now();
              return {{"content",
                       json::array(
                           {{{"type", "text"},
                             {"text", "Active session set to " + sess_id}}})}};
+         }},
+        {"get_scrollback",
+         "Retrieve the scrollback history buffer for a terminal session.",
+         {{"lines",
+           {{"type", "integer"},
+            {"description", "The number of scrollback lines to retrieve."}}},
+          {"format",
+           {{"type", "string"},
+            {"enum", {"text", "lines"}},
+            {"description",
+             "Output format, either 'text' (default) or 'lines'."}}},
+          {"session_id",
+           {{"type", "string"},
+            {"description", "Optional session ID to target."}}}},
+         {"lines"},
+         [](McpServer* server, const json& args) -> json {
+             if (!args.contains("lines")) {
+                 throw std::runtime_error("Missing required parameter: lines");
+             }
+             int lines = args.at("lines").get<int>();
+             if (lines <= 0) {
+                 throw std::runtime_error("Lines must be positive.");
+             }
+             std::string format = "text";
+             if (args.contains("format")) {
+                 format = args.at("format").get<std::string>();
+             }
+             auto term = server->GetTargetSession(args);
+             std::vector<std::string> sb = term->GetScrollback(lines);
+
+             if (format == "lines") {
+                 return {
+                     {"content", json::array({{{"type", "text"},
+                                               {"text", json(sb).dump()}}})}};
+             } else {
+                 std::string text;
+                 for (const auto& line : sb) {
+                     text += line + "\n";
+                 }
+                 return {{"content",
+                          json::array({{{"type", "text"}, {"text", text}}})}};
+             }
+         }},
+        {"get_area",
+         "Retrieve characters and/or attributes from a rectangular area on "
+         "the screen.",
+         {{"x",
+           {{"type", "integer"},
+            {"description",
+             "Column index (0-based) of the top-left corner."}}},
+          {"y",
+           {{"type", "integer"},
+            {"description", "Row index (0-based) of the top-left corner."}}},
+          {"width",
+           {{"type", "integer"},
+            {"description", "Width of the area in characters."}}},
+          {"height",
+           {{"type", "integer"},
+            {"description", "Height of the area in characters."}}},
+          {"format",
+           {{"type", "string"},
+            {"enum", {"text", "lines"}},
+            {"description",
+             "Output format for text, either 'text' (default) or 'lines'."}}},
+          {"include_text",
+           {{"type", "boolean"},
+            {"description",
+             "Include the text content of the area (default: true)."}}},
+          {"include_attrs",
+           {{"type", "boolean"},
+            {"description",
+             "Include the attribute map of the area (default: false)."}}},
+          {"snapshot_id",
+           {{"type", "integer"},
+            {"description",
+             "Optional ID of a snapshot to read from. Use -1 or omit for the "
+             "current active screen."}}},
+          {"session_id",
+           {{"type", "string"},
+            {"description", "Optional session ID to target."}}}},
+         {"x", "y", "width", "height"},
+         [](McpServer* server, const json& args) -> json {
+             if (!args.contains("x") || !args.contains("y") ||
+                 !args.contains("width") || !args.contains("height")) {
+                 throw std::runtime_error(
+                     "Missing required parameters: x, y, width, height");
+             }
+             int x = args.at("x").get<int>();
+             int y = args.at("y").get<int>();
+             int w = args.at("width").get<int>();
+             int h = args.at("height").get<int>();
+             if (w <= 0 || h <= 0) {
+                 throw std::runtime_error(
+                     "Width and height must be positive.");
+             }
+
+             std::string format = "text";
+             if (args.contains("format")) {
+                 format = args.at("format").get<std::string>();
+             }
+             bool include_text = true;
+             if (args.contains("include_text")) {
+                 include_text = args.at("include_text").get<bool>();
+             }
+             bool include_attrs = false;
+             if (args.contains("include_attrs")) {
+                 include_attrs = args.at("include_attrs").get<bool>();
+             }
+             int snap_id = args.contains("snapshot_id")
+                               ? args.at("snapshot_id").get<int>()
+                               : -1;
+
+             ScreenSnapshot snap =
+                 server->GetTargetSession(args)->GetSnapshot(snap_id);
+
+             bool clipped = false;
+             if (x < 0 || y < 0 || x + w > static_cast<int>(snap.width) ||
+                 y + h > static_cast<int>(snap.height)) {
+                 clipped = true;
+             }
+
+             int x1 = std::max(0, x);
+             int y1 = std::max(0, y);
+             int x2 = std::min(static_cast<int>(snap.width) - 1, x + w - 1);
+             int y2 = std::min(static_cast<int>(snap.height) - 1, y + h - 1);
+
+             json response_obj = json::object();
+
+             if (include_text) {
+                 if (x1 > x2 || y1 > y2) {
+                     if (format == "lines") {
+                         response_obj["text"] = json::array();
+                     } else {
+                         response_obj["text"] = "";
+                     }
+                 } else {
+                     if (format == "lines") {
+                         json lines_arr = json::array();
+                         for (int row = y1; row <= y2; ++row) {
+                             std::string row_str;
+                             for (int col = x1; col <= x2; ++col) {
+                                 row_str +=
+                                     snap.cells[row * snap.width + col].ch;
+                             }
+                             lines_arr.push_back(row_str);
+                         }
+                         response_obj["text"] = lines_arr;
+                     } else {
+                         std::string text_str;
+                         for (int row = y1; row <= y2; ++row) {
+                             if (row > y1) text_str += "\n";
+                             for (int col = x1; col <= x2; ++col) {
+                                 text_str +=
+                                     snap.cells[row * snap.width + col].ch;
+                             }
+                         }
+                         response_obj["text"] = text_str;
+                     }
+                 }
+             }
+
+             if (include_attrs) {
+                 json attrs_arr = json::array();
+                 if (!(x1 > x2 || y1 > y2)) {
+                     for (int row = y1; row <= y2; ++row) {
+                         json row_attrs = json::array();
+                         for (int col = x1; col <= x2; ++col) {
+                             row_attrs.push_back(app_utils::FormatAttr(
+                                 snap.cells[row * snap.width + col].attr));
+                         }
+                         attrs_arr.push_back(row_attrs);
+                     }
+                 }
+                 response_obj["attributes"] = attrs_arr;
+             }
+
+             if (clipped) {
+                 response_obj["warning"] =
+                     "Requested area was clipped by the actual screen "
+                     "dimensions (" +
+                     std::to_string(snap.width) + "x" +
+                     std::to_string(snap.height) + ").";
+             }
+
+             return {
+                 {"content", json::array({{{"type", "text"},
+                                           {"text", response_obj.dump()}}})}};
          }}};
     return kTools;
 }
@@ -911,7 +1251,8 @@ void McpServer::HandleToolsList(const json& id, const json& req) {
         t["name"] = std::string(tool.name);
         t["description"] = std::string(tool.description);
         t["inputSchema"]["type"] = "object";
-        t["inputSchema"]["properties"] = tool.properties;
+        t["inputSchema"]["properties"] =
+            tool.properties.is_object() ? tool.properties : json::object();
         if (!tool.required.empty()) {
             t["inputSchema"]["required"] = tool.required;
         }
@@ -920,7 +1261,7 @@ void McpServer::HandleToolsList(const json& id, const json& req) {
     }
 
     resp["result"]["tools"] = tools;
-    std::cout << resp.dump() << std::endl;
+    SendJson(resp);
 }
 
 void McpServer::HandleToolsCall(const json& id, const json& req) {
@@ -939,7 +1280,7 @@ void McpServer::HandleToolsCall(const json& id, const json& req) {
         resp["jsonrpc"] = "2.0";
         resp["id"] = id;
         resp["result"] = tool_result;
-        std::cout << resp.dump() << std::endl;
+        SendJson(resp);
     } catch (const std::exception& e) {
         json resp;
         resp["jsonrpc"] = "2.0";
@@ -948,7 +1289,7 @@ void McpServer::HandleToolsCall(const json& id, const json& req) {
         resp["result"]["content"] =
             json::array({{{"type", "text"},
                           {"text", std::string("Tool error: ") + e.what()}}});
-        std::cout << resp.dump() << std::endl;
+        SendJson(resp);
     }
 }
 

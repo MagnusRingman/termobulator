@@ -16,6 +16,8 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <fstream>
+#include <iostream>
 #include <mutex>
 #include <stdexcept>
 #include <string_view>
@@ -84,7 +86,8 @@ static void SetWinsize(int fd, unsigned int width, unsigned int height) {
 
 class TerminalBase : public Terminal {
   public:
-    TerminalBase(unsigned int width, unsigned int height);
+    TerminalBase(unsigned int width, unsigned int height,
+                 unsigned int scrollback_size = 200);
     ~TerminalBase() override;
 
     void SendRawBytes(std::string_view bytes) override;
@@ -99,6 +102,9 @@ class TerminalBase : public Terminal {
     WaitResult WaitIdle(unsigned int quiet_ms,
                         unsigned int deadline_ms) override;
 
+    void SetDisableAlternateScreen(bool disable) override;
+    std::vector<std::string> GetScrollback(unsigned int lines) override;
+
   protected:
     void FeedInput(const char *data, size_t len);
 
@@ -110,6 +116,7 @@ class TerminalBase : public Terminal {
     std::mutex pty_update_mutex_;
     std::condition_variable pty_update_cv_;
     std::chrono::steady_clock::time_point last_update_time_;
+    bool disable_alternate_screen_ = false;
 
   private:
     ScreenSnapshot CaptureCurrent();
@@ -121,6 +128,7 @@ class TerminalBase : public Terminal {
         unsigned int width;
         unsigned int height;
         std::vector<Cell> &cells;
+        unsigned int next_valid_idx = 0;
     };
 
     static int DrawCb(struct tsm_screen *con, uint64_t id, const uint32_t *ch,
@@ -129,12 +137,14 @@ class TerminalBase : public Terminal {
                       tsm_age_t age, void *data);
 };
 
-TerminalBase::TerminalBase(unsigned int width, unsigned int height) {
+TerminalBase::TerminalBase(unsigned int width, unsigned int height,
+                           unsigned int scrollback_size) {
     int r = tsm_screen_new(&screen_, nullptr, nullptr);
     if (r < 0) {
         throw std::runtime_error("failed to create tsm_screen");
     }
     tsm_screen_resize(screen_, width, height);
+    tsm_screen_set_max_sb(screen_, scrollback_size);
 
     r = tsm_vte_new(&vte_, screen_, WriteCb, this, nullptr, nullptr);
     if (r < 0) {
@@ -156,6 +166,152 @@ void TerminalBase::Resize(unsigned int width, unsigned int height) {
 void TerminalBase::FeedInput(const char *data, size_t len) {
     std::lock_guard<std::mutex> lock(mutex_);
     tsm_vte_input(vte_, data, len);
+    if (disable_alternate_screen_ &&
+        (tsm_screen_get_flags(screen_) & TSM_SCREEN_ALTERNATE)) {
+        tsm_screen_reset_flags(screen_, TSM_SCREEN_ALTERNATE);
+    }
+}
+
+void TerminalBase::SetDisableAlternateScreen(bool disable) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    disable_alternate_screen_ = disable;
+    if (disable_alternate_screen_ &&
+        (tsm_screen_get_flags(screen_) & TSM_SCREEN_ALTERNATE)) {
+        tsm_screen_reset_flags(screen_, TSM_SCREEN_ALTERNATE);
+    }
+}
+
+struct tsm_line_internal {
+    struct tsm_line_internal *next;
+    struct tsm_line_internal *prev;
+    unsigned int size;
+    void *cells;
+    uint64_t sb_id;
+    tsm_age_t age;
+};
+
+struct tsm_screen_internal {
+    size_t ref;
+    void *llog;
+    void *llog_data;
+    unsigned int opts;
+    unsigned int flags;
+    void *sym_table;
+    struct tsm_screen_attr def_attr;
+    tsm_age_t age_cnt;
+    unsigned int age_reset : 1;
+
+    unsigned int size_x;
+    unsigned int size_y;
+    unsigned int margin_top;
+    unsigned int margin_bottom;
+    unsigned int line_num;
+    struct tsm_line_internal **lines;
+    struct tsm_line_internal **main_lines;
+    struct tsm_line_internal **alt_lines;
+    tsm_age_t age;
+
+    unsigned int sb_count;
+    struct tsm_line_internal *sb_first;
+    struct tsm_line_internal *sb_last;
+    unsigned int sb_max;
+    struct tsm_line_internal *sb_pos;
+    uint64_t sb_last_id;
+};
+
+std::vector<std::string> TerminalBase::GetScrollback(unsigned int lines) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    unsigned int old_flags = tsm_screen_get_flags(screen_);
+    if (old_flags & TSM_SCREEN_ALTERNATE) {
+        tsm_screen_reset_flags(screen_, TSM_SCREEN_ALTERNATE);
+    }
+
+    auto *scr = reinterpret_cast<struct tsm_screen_internal *>(screen_);
+
+    unsigned int skip = 0;
+    if (scr->sb_count > lines) {
+        skip = scr->sb_count - lines;
+    }
+
+    struct tsm_line_internal *curr = scr->sb_first;
+    for (unsigned int i = 0; i < skip && curr; ++i) {
+        curr = curr->next;
+    }
+
+    std::vector<std::string> scroll_lines;
+    unsigned int w = tsm_screen_get_width(screen_);
+
+    struct SingleRowDrawData {
+        unsigned int width;
+        std::vector<std::string> cells;
+        unsigned int next_valid_x = 0;
+    };
+
+    auto single_row_cb =
+        [](struct tsm_screen *con, uint64_t id, const uint32_t *ch, size_t len,
+           unsigned int cell_width, unsigned int posx, unsigned int posy,
+           const struct tsm_screen_attr *attr, tsm_age_t age,
+           void *data) -> int {
+        auto *dd = static_cast<SingleRowDrawData *>(data);
+        if (posy == 0 && posx < dd->width) {
+            if (posx < dd->next_valid_x) {
+                return 0;
+            }
+            std::string s;
+            if (len == 0) {
+                s = " ";
+            } else {
+                for (size_t i = 0; i < len; ++i) {
+                    std::array<char, 8> buf;
+                    size_t bytes = tsm_ucs4_to_utf8(ch[i], buf.data());
+                    if (bytes > 0 && bytes < buf.size())
+                        s.append(buf.data(), bytes);
+                }
+            }
+            dd->cells[posx] = std::move(s);
+            for (unsigned int i = 1; i < cell_width && (posx + i) < dd->width;
+                 ++i) {
+                dd->cells[posx + i].clear();
+            }
+            dd->next_valid_x = posx + cell_width;
+        }
+        return 0;
+    };
+
+    unsigned int saved_size_y = scr->size_y;
+    struct tsm_line_internal *saved_sb_pos = scr->sb_pos;
+
+    scr->size_y = 1;
+
+    while (curr) {
+        SingleRowDrawData dd{w, std::vector<std::string>(w, " "), 0};
+        scr->sb_pos = curr;
+        tsm_screen_draw(screen_, single_row_cb, &dd);
+
+        std::string row_str;
+        row_str.reserve(w);
+        for (const auto &cell_str : dd.cells) {
+            row_str += cell_str;
+        }
+
+        size_t endpos = row_str.find_last_not_of(" \t\r\n");
+        if (endpos != std::string::npos) {
+            row_str = row_str.substr(0, endpos + 1);
+        } else {
+            row_str.clear();
+        }
+        scroll_lines.push_back(std::move(row_str));
+        curr = curr->next;
+    }
+
+    scr->size_y = saved_size_y;
+    scr->sb_pos = saved_sb_pos;
+
+    if (old_flags & TSM_SCREEN_ALTERNATE) {
+        tsm_screen_set_flags(screen_, TSM_SCREEN_ALTERNATE);
+    }
+
+    return scroll_lines;
 }
 
 void TerminalBase::SendRawBytes(std::string_view bytes) {
@@ -217,6 +373,11 @@ int TerminalBase::DrawCb(struct tsm_screen *con, uint64_t id,
     auto *draw_data = static_cast<DrawData *>(data);
     if (posy >= draw_data->height || posx >= draw_data->width) return 0;
 
+    unsigned int base_idx = posy * draw_data->width + posx;
+    if (base_idx < draw_data->next_valid_idx) {
+        return 0;
+    }
+
     std::string s;
     if (len == 0) {
         s = " ";
@@ -227,7 +388,6 @@ int TerminalBase::DrawCb(struct tsm_screen *con, uint64_t id,
             if (bytes > 0 && bytes < buf.size()) s.append(buf.data(), bytes);
         }
     }
-    unsigned int base_idx = posy * draw_data->width + posx;
     draw_data->cells[base_idx].ch = std::move(s);
     draw_data->cells[base_idx].attr = MapAttr(*attr);
     for (unsigned int i = 1; i < cell_width && (posx + i) < draw_data->width;
@@ -235,6 +395,7 @@ int TerminalBase::DrawCb(struct tsm_screen *con, uint64_t id,
         draw_data->cells[base_idx + i].ch.clear();
         draw_data->cells[base_idx + i].attr = MapAttr(*attr);
     }
+    draw_data->next_valid_idx = base_idx + cell_width;
     return 0;
 }
 
@@ -481,7 +642,8 @@ class SubprocessTerminalImpl : public TerminalBase {
                            const std::string &cmd,
                            const std::vector<std::string> &args,
                            const std::string &term_type,
-                           const std::string &locale);
+                           const std::string &locale,
+                           unsigned int scrollback_size);
     ~SubprocessTerminalImpl() override;
 
     bool IsExited() const override;
@@ -499,8 +661,8 @@ class SubprocessTerminalImpl : public TerminalBase {
 SubprocessTerminalImpl::SubprocessTerminalImpl(
     unsigned int width, unsigned int height, const std::string &cmd,
     const std::vector<std::string> &args, const std::string &term_type,
-    const std::string &locale)
-        : TerminalBase(width, height) {
+    const std::string &locale, unsigned int scrollback_size)
+        : TerminalBase(width, height, scrollback_size) {
     auto [master_fd, slave_fd] = OpenPty();
 
     pid_t pid = fork();
@@ -617,7 +779,8 @@ void SubprocessTerminalImpl::Resize(unsigned int width, unsigned int height) {
 class ThreadTerminalImpl : public TerminalBase {
   public:
     ThreadTerminalImpl(unsigned int width, unsigned int height,
-                       std::function<void()> client_func);
+                       std::function<void()> client_func,
+                       unsigned int scrollback_size);
     ~ThreadTerminalImpl() override;
 
     bool IsExited() const override;
@@ -634,8 +797,9 @@ class ThreadTerminalImpl : public TerminalBase {
 };
 
 ThreadTerminalImpl::ThreadTerminalImpl(unsigned int width, unsigned int height,
-                                       std::function<void()> client_func)
-        : TerminalBase(width, height) {
+                                       std::function<void()> client_func,
+                                       unsigned int scrollback_size)
+        : TerminalBase(width, height, scrollback_size) {
     auto [master_fd, slave_fd] = OpenPty();
     slave_fd_ = slave_fd;
     SetWinsize(master_fd, width, height);
@@ -751,15 +915,16 @@ void ThreadTerminalImpl::Resize(unsigned int width, unsigned int height) {
 std::unique_ptr<Terminal> CreateSubprocessTerminal(
     unsigned int width, unsigned int height, const std::string &cmd,
     const std::vector<std::string> &args, const std::string &term_type,
-    const std::string &locale) {
-    return std::make_unique<SubprocessTerminalImpl>(width, height, cmd, args,
-                                                    term_type, locale);
+    const std::string &locale, unsigned int scrollback_size) {
+    return std::make_unique<SubprocessTerminalImpl>(
+        width, height, cmd, args, term_type, locale, scrollback_size);
 }
 
 std::unique_ptr<Terminal> CreateThreadTerminal(
-    unsigned int width, unsigned int height,
-    std::function<void()> client_func) {
-    return std::make_unique<ThreadTerminalImpl>(width, height, client_func);
+    unsigned int width, unsigned int height, std::function<void()> client_func,
+    unsigned int scrollback_size) {
+    return std::make_unique<ThreadTerminalImpl>(width, height, client_func,
+                                                scrollback_size);
 }
 
 }  // namespace unstable

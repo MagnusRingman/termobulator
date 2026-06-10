@@ -32,7 +32,9 @@ int main(int argc, char* argv[]) {
     unsigned int height = 24;
     std::string term_type = "tmux-256color";
     std::string locale = "";
+    unsigned int idle_timeout_sec = 300;
     bool mcp_mode = false;
+    bool do_log = false;
     int arg_idx = 1;
     while (arg_idx < argc) {
         std::string arg = argv[arg_idx];
@@ -76,8 +78,39 @@ int main(int argc, char* argv[]) {
             }
             locale = argv[arg_idx + 1];
             arg_idx += 2;
+        } else if (arg == "--idle-timeout" || arg == "-i") {
+            if (arg_idx + 1 >= argc) {
+                std::cerr << "Error: --idle-timeout requires an argument\n";
+                return 1;
+            }
+            try {
+                idle_timeout_sec = static_cast<unsigned int>(parse_positive(
+                                       argv[arg_idx + 1], "idle-timeout")) *
+                                   60;
+            } catch (const std::exception& e) {
+                std::cerr << "Error: " << e.what() << "\n";
+                return 1;
+            }
+            arg_idx += 2;
+        } else if (arg == "--idle-timeout-sec") {
+            if (arg_idx + 1 >= argc) {
+                std::cerr
+                    << "Error: --idle-timeout-sec requires an argument\n";
+                return 1;
+            }
+            try {
+                idle_timeout_sec = static_cast<unsigned int>(
+                    parse_positive(argv[arg_idx + 1], "idle-timeout-sec"));
+            } catch (const std::exception& e) {
+                std::cerr << "Error: " << e.what() << "\n";
+                return 1;
+            }
+            arg_idx += 2;
         } else if (arg == "--mcp" || arg == "-m") {
             mcp_mode = true;
+            arg_idx += 1;
+        } else if (arg == "--do_log") {
+            do_log = true;
             arg_idx += 1;
         } else {
             break;
@@ -91,12 +124,16 @@ int main(int argc, char* argv[]) {
         if (arg_idx < argc) {
             std::cerr << "Error: Target binary and arguments are not allowed "
                          "in MCP mode.\n";
-            std::cerr << "Usage in MCP mode: " << argv[0]
-                      << " [--mcp|-m] [--width <width>] [--height <height>] "
-                         "[--terminal <term>] [--locale <locale>]\n";
+            std::cerr
+                << "Usage in MCP mode: " << argv[0]
+                << " [--mcp|-m] [--do_log] [--width <width>] [--height "
+                   "<height>] "
+                   "[--terminal <term>] [--locale <locale>] [--idle-timeout "
+                   "<minutes>] [--idle-timeout-sec <seconds>]\n";
             return 1;
         }
-        termobulator::McpServer server(width, height, term_type, locale);
+        termobulator::McpServer server(width, height, term_type, locale,
+                                       idle_timeout_sec, do_log);
         return server.Run();
     } else {
         if (arg_idx >= argc) {

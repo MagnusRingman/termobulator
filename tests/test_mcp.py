@@ -121,6 +121,23 @@ def run_mcp_test():
         assert "list_sessions" in tool_names
         assert "set_active_session" in tool_names
 
+        # Test error when calling a tool without active session
+        send_msg({
+            "jsonrpc": "2.0",
+            "id": 99,
+            "method": "tools/call",
+            "params": {
+                "name": "get_screen",
+                "arguments": {}
+            }
+        })
+        resp = read_msg()
+        assert resp is not None
+        assert resp["id"] == 99
+        assert "error" in resp or resp.get("result", {}).get("isError", False)
+        err_msg = resp["error"]["message"] if "error" in resp else resp["result"]["content"][0]["text"]
+        assert "No active session. Please create a session using create_session first." in err_msg, f"Expected active session error message, got {err_msg}"
+
         # 4b. Create default session running target_path
         send_msg({
             "jsonrpc": "2.0",
@@ -587,6 +604,151 @@ def run_mcp_test():
         text_content = resp["result"]["content"][0]["text"]
         assert text_content == "exited 0", f"Expected 'exited 0', got {text_content}"
 
+        # Create a session to test scrollback
+        send_msg({
+            "jsonrpc": "2.0",
+            "id": 300,
+            "method": "tools/call",
+            "params": {
+                "name": "create_session",
+                "arguments": {
+                    "binary": "seq",
+                    "arguments": ["1", "30"],
+                    "session_id": "sb_test",
+                    "scrollback_size": 200
+                }
+            }
+        })
+        resp = read_msg()
+        assert resp is not None
+        assert not resp["result"].get("isError", False)
+
+        # Wait for seq to complete/idle
+        send_msg({
+            "jsonrpc": "2.0",
+            "id": 301,
+            "method": "tools/call",
+            "params": {
+                "name": "wait_idle",
+                "arguments": {
+                    "session_id": "sb_test",
+                    "quiet_ms": 100,
+                    "deadline_ms": 1000
+                }
+            }
+        })
+        resp = read_msg()
+        assert resp is not None
+
+        # Test get_scrollback text format
+        send_msg({
+            "jsonrpc": "2.0",
+            "id": 201,
+            "method": "tools/call",
+            "params": {
+                "name": "get_scrollback",
+                "arguments": {
+                    "session_id": "sb_test",
+                    "lines": 10,
+                    "format": "text"
+                }
+            }
+        })
+        resp = read_msg()
+        assert resp is not None
+        assert not resp["result"].get("isError", False)
+        sb_text = resp["result"]["content"][0]["text"]
+        assert "1" in sb_text, f"Expected '1' in scrollback, got: {sb_text}"
+
+        # Test get_scrollback lines format
+        send_msg({
+            "jsonrpc": "2.0",
+            "id": 202,
+            "method": "tools/call",
+            "params": {
+                "name": "get_scrollback",
+                "arguments": {
+                    "session_id": "sb_test",
+                    "lines": 10,
+                    "format": "lines"
+                }
+            }
+        })
+        resp = read_msg()
+        assert resp is not None
+        assert not resp["result"].get("isError", False)
+        sb_lines = json.loads(resp["result"]["content"][0]["text"])
+        assert isinstance(sb_lines, list)
+        assert any("1" in line for line in sb_lines), f"Expected '1' line in scrollback list: {sb_lines}"
+
+        # Test get_area
+        send_msg({
+            "jsonrpc": "2.0",
+            "id": 203,
+            "method": "tools/call",
+            "params": {
+                "name": "get_area",
+                "arguments": {
+                    "x": 0,
+                    "y": 0,
+                    "width": 10,
+                    "height": 2,
+                    "format": "text",
+                    "include_text": True,
+                    "include_attrs": True
+                }
+            }
+        })
+        resp = read_msg()
+        assert resp is not None
+        assert not resp["result"].get("isError", False)
+        area_res = json.loads(resp["result"]["content"][0]["text"])
+        assert "text" in area_res
+        assert "attributes" in area_res
+        assert isinstance(area_res["attributes"], list)
+
+        # Test get_area clipping warning
+        send_msg({
+            "jsonrpc": "2.0",
+            "id": 204,
+            "method": "tools/call",
+            "params": {
+                "name": "get_area",
+                "arguments": {
+                    "x": -5,
+                    "y": 0,
+                    "width": 100,
+                    "height": 2,
+                    "format": "lines",
+                    "include_text": True
+                }
+            }
+        })
+        resp = read_msg()
+        assert resp is not None
+        assert not resp["result"].get("isError", False)
+        area_res_clip = json.loads(resp["result"]["content"][0]["text"])
+        assert "warning" in area_res_clip
+        assert "clipped" in area_res_clip["warning"]
+
+        # Test get_attributes with include_ranges=True
+        send_msg({
+            "jsonrpc": "2.0",
+            "id": 205,
+            "method": "tools/call",
+            "params": {
+                "name": "get_attributes",
+                "arguments": {
+                    "include_ranges": True
+                }
+            }
+        })
+        resp = read_msg()
+        assert resp is not None
+        assert not resp["result"].get("isError", False)
+        attrs_text = resp["result"]["content"][0]["text"]
+        assert "row" in attrs_text, f"Expected ranges (including 'row') in attributes output, got: {attrs_text}"
+
         # Terminate termobulator
         proc.stdin.close()
         proc.wait(timeout=2.0)
@@ -598,5 +760,219 @@ def run_mcp_test():
         print("MCP test failed:", e)
         sys.exit(1)
 
+def run_idle_timeout_test():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(script_dir)
+    
+    if os.path.exists("./termobulator"):
+        binary_path = "./termobulator"
+    elif os.path.exists(os.path.join(project_root, "build", "termobulator")):
+        binary_path = os.path.join(project_root, "build", "termobulator")
+    else:
+        binary_path = "./build/termobulator"
+        
+    target_path = os.path.join(script_dir, "target.sh")
+
+    print("Running MCP idle timeout test...")
+    proc = subprocess.Popen(
+        [binary_path, "--mcp", "--idle-timeout-sec", "2"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True
+    )
+
+    def send_msg(msg):
+        line = json.dumps(msg)
+        proc.stdin.write(line + "\n")
+        proc.stdin.flush()
+
+    def read_msg():
+        line = proc.stdout.readline()
+        if not line:
+            return None
+        return json.loads(line)
+
+    try:
+        # Initialize
+        send_msg({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "TestClient", "version": "1.1.0"}
+            }
+        })
+        read_msg()
+        send_msg({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        })
+
+        # Create session
+        send_msg({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "create_session",
+                "arguments": {
+                    "binary": target_path,
+                    "session_id": "test_timeout"
+                }
+            }
+        })
+        resp = read_msg()
+        assert resp is not None
+        assert not resp["result"].get("isError", False)
+
+        # Confirm session is listed
+        send_msg({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "list_sessions",
+                "arguments": {}
+            }
+        })
+        resp = read_msg()
+        assert resp is not None
+        sess_list = json.loads(resp["result"]["content"][0]["text"])
+        assert len(sess_list) == 1
+        assert sess_list[0]["session_id"] == "test_timeout"
+
+        # Wait 3 seconds to exceed the 2 second idle timeout
+        time.sleep(3.0)
+
+        # Try listing sessions - it should be gone (empty list)
+        send_msg({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "list_sessions",
+                "arguments": {}
+            }
+        })
+        resp = read_msg()
+        assert resp is not None
+        sess_list = json.loads(resp["result"]["content"][0]["text"])
+        assert len(sess_list) == 0, f"Expected session to be cleaned up, but got list: {sess_list}"
+
+        # Clean terminate
+        proc.stdin.close()
+        proc.wait(timeout=2.0)
+        print("MCP idle timeout test passed successfully!")
+
+    except Exception as e:
+        proc.kill()
+        traceback.print_exc()
+        print("MCP idle timeout test failed:", e)
+        sys.exit(1)
+
+def run_logging_test():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(script_dir)
+    
+    if os.path.exists("./termobulator"):
+        binary_path = "./termobulator"
+    elif os.path.exists(os.path.join(project_root, "build", "termobulator")):
+        binary_path = os.path.join(project_root, "build", "termobulator")
+    else:
+        binary_path = "./build/termobulator"
+        
+    print("Running MCP logging test...")
+    proc = subprocess.Popen(
+        [binary_path, "--mcp", "--do_log"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True
+    )
+    
+    pid = proc.pid
+    log_path = f"/tmp/termobulator-{pid}.log"
+    
+    if os.path.exists(log_path):
+        os.remove(log_path)
+        
+    def send_msg(msg):
+        line = json.dumps(msg)
+        proc.stdin.write(line + "\n")
+        proc.stdin.flush()
+
+    def read_msg():
+        line = proc.stdout.readline()
+        if not line:
+            return None
+        return json.loads(line)
+
+    try:
+        init_req = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "TestClient", "version": "1.1.0"}
+            }
+        }
+        send_msg(init_req)
+        init_resp = read_msg()
+        assert init_resp is not None
+        
+        init_notif = {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        }
+        send_msg(init_notif)
+        
+        proc.stdin.close()
+        proc.wait(timeout=2.0)
+        
+        assert os.path.exists(log_path), f"Log file {log_path} was not created"
+        
+        with open(log_path, "r") as f:
+            log_lines = f.read().splitlines()
+            
+        print("Log lines captured:")
+        for line in log_lines:
+            print(f"  {line}")
+            
+        assert len(log_lines) >= 3, f"Expected at least 3 log lines, got {len(log_lines)}"
+        
+        assert log_lines[0].startswith("[RECV] "), f"Expected line 0 to start with '[RECV] ', got '{log_lines[0]}'"
+        log_init_req = json.loads(log_lines[0][7:])
+        assert log_init_req["method"] == "initialize"
+        
+        assert log_lines[1].startswith("[SEND] "), f"Expected line 1 to start with '[SEND] ', got '{log_lines[1]}'"
+        log_init_resp = json.loads(log_lines[1][7:])
+        assert log_init_resp["id"] == 1
+        assert "result" in log_init_resp
+        
+        assert log_lines[2].startswith("[RECV] "), f"Expected line 2 to start with '[RECV] ', got '{log_lines[2]}'"
+        log_init_notif = json.loads(log_lines[2][7:])
+        assert log_init_notif["method"] == "notifications/initialized"
+        
+        os.remove(log_path)
+        print("MCP logging test passed successfully!")
+        
+    except Exception as e:
+        proc.kill()
+        if os.path.exists(log_path):
+            try:
+                os.remove(log_path)
+            except:
+                pass
+        traceback.print_exc()
+        print("MCP logging test failed:", e)
+        sys.exit(1)
+
 if __name__ == "__main__":
     run_mcp_test()
+    run_idle_timeout_test()
+    run_logging_test()

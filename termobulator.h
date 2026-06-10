@@ -106,6 +106,9 @@ class Terminal {
     virtual WaitResult WaitIdle(unsigned int quiet_ms,
                                 unsigned int deadline_ms) = 0;
 
+    virtual void SetDisableAlternateScreen(bool disable) = 0;
+    virtual std::vector<std::string> GetScrollback(unsigned int lines) = 0;
+
     // Static utilities
     static uint32_t ParseKeysym(std::string_view name);
     static std::vector<std::string> GetKeysyms();
@@ -119,11 +122,11 @@ std::unique_ptr<Terminal> CreateSubprocessTerminal(
     unsigned int width, unsigned int height, const std::string &cmd,
     const std::vector<std::string> &args,
     const std::string &term_type = "tmux-256color",
-    const std::string &locale = "");
+    const std::string &locale = "", unsigned int scrollback_size = 200);
 
 std::unique_ptr<Terminal> CreateThreadTerminal(
-    unsigned int width, unsigned int height,
-    std::function<void()> client_func);
+    unsigned int width, unsigned int height, std::function<void()> client_func,
+    unsigned int scrollback_size = 200);
 
 }  // namespace unstable
 }  // namespace termobulator
