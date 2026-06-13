@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "dsl_interpreter.h"
 #include "termobulator.h"
 
 namespace termobulator {
@@ -55,7 +56,15 @@ class McpServer {
                           const std::string& message);
     std::shared_ptr<termobulator::unstable::Terminal> GetTargetSession(
         const json& args);
+    std::shared_ptr<termobulator::unstable::Interpreter> GetInterpreter(
+        const json& args);
     void CloseSessionInternal(const std::string& sess_id);
+
+    void ParseRoots(const json& roots_json);
+    void RequestRoots();
+    void HandleRootsListChanged(const json& req);
+    bool IsPathInWorkspace(const std::string& binary_path);
+    std::string ResolveBinaryPath(const std::string& binary);
 
     unsigned int width_;
     unsigned int height_;
@@ -65,9 +74,14 @@ class McpServer {
 
     bool initialized_ = false;
     bool initialize_received_ = false;
+    bool client_supports_roots_ = false;
+    std::vector<std::string> workspace_roots_;
     std::unordered_map<std::string,
                        std::shared_ptr<termobulator::unstable::Terminal>>
         sessions_;
+    std::unordered_map<std::string,
+                       std::shared_ptr<termobulator::unstable::Interpreter>>
+        interpreters_;
     std::string active_session_id_;
     std::string first_session_id_;
     int first_session_exit_code_ = 0;

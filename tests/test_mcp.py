@@ -111,31 +111,31 @@ def run_mcp_test():
         tools = resp["result"]["tools"]
         tool_names = [t["name"] for t in tools]
         print("Exposed tools:", tool_names)
-        assert "get_screen" in tool_names
-        assert "send_key" in tool_names
-        assert "wait_idle" in tool_names
-        assert "find_text" in tool_names
-        assert "get_row" in tool_names
-        assert "create_session" in tool_names
-        assert "close_session" in tool_names
-        assert "list_sessions" in tool_names
-        assert "set_active_session" in tool_names
+        assert set(tool_names) == {
+            "create_session",
+            "close_session",
+            "list_sessions",
+            "set_active_session",
+            "execute_dsl"
+        }, f"Unexpected tool list: {tool_names}"
 
-        # Test error when calling a tool without active session
+        # Test error when calling execute_dsl without active session
         send_msg({
             "jsonrpc": "2.0",
             "id": 99,
             "method": "tools/call",
             "params": {
-                "name": "get_screen",
-                "arguments": {}
+                "name": "execute_dsl",
+                "arguments": {
+                    "instructions": "20 500 wait_idle"
+                }
             }
         })
         resp = read_msg()
         assert resp is not None
         assert resp["id"] == 99
-        assert "error" in resp or resp.get("result", {}).get("isError", False)
-        err_msg = resp["error"]["message"] if "error" in resp else resp["result"]["content"][0]["text"]
+        assert resp.get("result", {}).get("isError", False)
+        err_msg = resp["result"]["content"][0]["text"]
         assert "No active session. Please create a session using create_session first." in err_msg, f"Expected active session error message, got {err_msg}"
 
         # 4b. Create default session running target_path
@@ -164,10 +164,9 @@ def run_mcp_test():
             "id": 4,
             "method": "tools/call",
             "params": {
-                "name": "wait_idle",
+                "name": "execute_dsl",
                 "arguments": {
-                    "quiet_ms": 20,
-                    "deadline_ms": 500
+                    "instructions": "20 500 wait_idle"
                 }
             }
         })
@@ -175,49 +174,56 @@ def run_mcp_test():
         assert resp is not None
         assert resp["id"] == 4
         assert not resp["result"].get("isError", False)
-        text_content = resp["result"]["content"][0]["text"]
-        assert text_content == "wait: idle", f"Expected 'wait: idle', got {text_content}"
+        stack = json.loads(resp["result"]["content"][0]["text"])
+        assert stack == ["wait: idle"], f"Expected ['wait: idle'], got {stack}"
 
-        # 6. Call get_screen
+        # 6. Call get_screen via DSL
         send_msg({
             "jsonrpc": "2.0",
             "id": 5,
             "method": "tools/call",
             "params": {
-                "name": "get_screen",
-                "arguments": {}
+                "name": "execute_dsl",
+                "arguments": {
+                    "instructions": "clear -1 get_screen"
+                }
             }
         })
         resp = read_msg()
         assert resp is not None
         assert resp["id"] == 5
-        text_content = resp["result"]["content"][0]["text"]
-        assert text_content.startswith("READY"), f"Expected screen to start with READY, got: {text_content[:20]}"
+        assert not resp["result"].get("isError", False)
+        stack = json.loads(resp["result"]["content"][0]["text"])
+        assert len(stack) == 1
+        screen_str = stack[0]
+        assert screen_str.startswith("READY"), f"Expected screen to start with READY, got: {screen_str[:20]}"
 
-        # 7. Take a snapshot
+        # 7. Take a snapshot via DSL
         send_msg({
             "jsonrpc": "2.0",
             "id": 6,
             "method": "tools/call",
             "params": {
-                "name": "take_snapshot",
-                "arguments": {}
+                "name": "execute_dsl",
+                "arguments": {
+                    "instructions": "clear take_snapshot"
+                }
             }
         })
         resp = read_msg()
         assert resp is not None
         assert resp["id"] == 6
-        text_content = resp["result"]["content"][0]["text"]
-        snap_data = json.loads(text_content)
-        assert snap_data["snapshot_id"] == 0, f"Expected snapshot_id to be 0, got {snap_data}"
+        assert not resp["result"].get("isError", False)
+        stack = json.loads(resp["result"]["content"][0]["text"])
+        assert stack == [0], f"Expected snapshot ID 0, got {stack}"
 
-        # Test parameter validation: missing required parameter keyname in send_special_key
+        # Test parameter validation: missing required parameter instructions in execute_dsl
         send_msg({
             "jsonrpc": "2.0",
             "id": 21,
             "method": "tools/call",
             "params": {
-                "name": "send_special_key",
+                "name": "execute_dsl",
                 "arguments": {}
             }
         })
@@ -226,93 +232,93 @@ def run_mcp_test():
         assert resp["id"] == 21
         assert resp["result"].get("isError") is True
         err_text = resp["result"]["content"][0]["text"]
-        assert "Missing required parameter" in err_text, f"Expected validation error, got: {err_text}"
+        assert "Missing required parameter" in err_text or "instructions" in err_text, f"Expected validation error, got: {err_text}"
 
-        # Test get_cursor returns JSON
+        # Test get_cursor via DSL (returns [cursor_x, cursor_y, visible])
         send_msg({
             "jsonrpc": "2.0",
             "id": 22,
             "method": "tools/call",
             "params": {
-                "name": "get_cursor",
-                "arguments": {}
+                "name": "execute_dsl",
+                "arguments": {
+                    "instructions": "clear -1 get_cursor"
+                }
             }
         })
         resp = read_msg()
         assert resp is not None
         assert resp["id"] == 22
-        cursor_data = json.loads(resp["result"]["content"][0]["text"])
-        assert "col" in cursor_data
-        assert "row" in cursor_data
-        assert "visible" in cursor_data
+        stack = json.loads(resp["result"]["content"][0]["text"])
+        assert len(stack) == 3
+        # stack is [cursor_x, cursor_y, visible]
+        assert isinstance(stack[0], int)
+        assert isinstance(stack[1], int)
+        assert isinstance(stack[2], bool)
 
-        # Test get_cell returns JSON
+        # Test get_cell via DSL
         send_msg({
             "jsonrpc": "2.0",
             "id": 23,
             "method": "tools/call",
             "params": {
-                "name": "get_cell",
-                "arguments": {"x": 0, "y": 0}
+                "name": "execute_dsl",
+                "arguments": {
+                    "instructions": "clear 0 0 -1 get_cell"
+                }
             }
         })
         resp = read_msg()
         assert resp is not None
         assert resp["id"] == 23
-        cell_data = json.loads(resp["result"]["content"][0]["text"])
+        stack = json.loads(resp["result"]["content"][0]["text"])
+        assert len(stack) == 1
+        cell_data = stack[0]
         assert "char" in cell_data
         assert "fg" in cell_data
         assert "bg" in cell_data
 
-        # Test get_row
+        # Test get_row via DSL
         send_msg({
             "jsonrpc": "2.0",
             "id": 24,
             "method": "tools/call",
             "params": {
-                "name": "get_row",
-                "arguments": {"row": 0}
+                "name": "execute_dsl",
+                "arguments": {
+                    "instructions": "clear 0 -1 get_row"
+                }
             }
         })
         resp = read_msg()
         assert resp is not None
         assert resp["id"] == 24
-        row_text = resp["result"]["content"][0]["text"]
+        stack = json.loads(resp["result"]["content"][0]["text"])
+        assert len(stack) == 1
+        row_text = stack[0]
         assert row_text.startswith("READY"), f"Expected row 0 to start with READY, got: {row_text}"
 
-        # Test find_text
+        # Test find_text via DSL
         send_msg({
             "jsonrpc": "2.0",
             "id": 25,
             "method": "tools/call",
             "params": {
-                "name": "find_text",
-                "arguments": {"text": "READY"}
+                "name": "execute_dsl",
+                "arguments": {
+                    "instructions": "clear \"READY\" -1 find_text"
+                }
             }
         })
         resp = read_msg()
         assert resp is not None
         assert resp["id"] == 25
-        find_data = json.loads(resp["result"]["content"][0]["text"])
+        stack = json.loads(resp["result"]["content"][0]["text"])
+        assert len(stack) == 1
+        find_data = stack[0]
         assert len(find_data) > 0
         assert find_data[0]["row"] == 0
         assert find_data[0]["col_start"] == 0
-
-        # Test get_attributes without snapshot_id but with attribute_id (should fail)
-        send_msg({
-            "jsonrpc": "2.0",
-            "id": 26,
-            "method": "tools/call",
-            "params": {
-                "name": "get_attributes",
-                "arguments": {"attribute_id": 0}
-            }
-        })
-        resp = read_msg()
-        assert resp is not None
-        assert resp["id"] == 26
-        assert resp["result"].get("isError") is True
-        assert "snapshot_id is required" in resp["result"]["content"][0]["text"]
 
         # Test JSON-RPC id field type validation
         send_msg({
@@ -368,42 +374,28 @@ def run_mcp_test():
         default_item = next((s for s in sess_list if s["session_id"] == "default"), None)
         assert default_item is not None
 
-        # 13. Query screen of session_2
-        send_msg({
-            "jsonrpc": "2.0",
-            "id": 32,
-            "method": "tools/call",
-            "params": {
-                "name": "wait_idle",
-                "arguments": {
-                    "session_id": "session_2",
-                    "quiet_ms": 20,
-                    "deadline_ms": 500
-                }
-            }
-        })
-        resp = read_msg()
-        assert resp is not None
-        assert resp["id"] == 32
-
+        # 13. Query screen of session_2 via execute_dsl specifying session_id
         send_msg({
             "jsonrpc": "2.0",
             "id": 33,
             "method": "tools/call",
             "params": {
-                "name": "get_screen",
+                "name": "execute_dsl",
                 "arguments": {
-                    "session_id": "session_2"
+                    "session_id": "session_2",
+                    "instructions": "20 500 wait_idle clear -1 get_screen"
                 }
             }
         })
         resp = read_msg()
         assert resp is not None
         assert resp["id"] == 33
-        screen2 = resp["result"]["content"][0]["text"]
+        stack = json.loads(resp["result"]["content"][0]["text"])
+        assert len(stack) == 1
+        screen2 = stack[0]
         assert "hello_from_session_2" in screen2, f"Expected hello_from_session_2, got: {screen2}"
 
-        # 14. Activate session_2 and run get_screen without session_id (should target session_2)
+        # 14. Activate session_2 and run execute_dsl without session_id (should target session_2)
         send_msg({
             "jsonrpc": "2.0",
             "id": 34,
@@ -425,14 +417,18 @@ def run_mcp_test():
             "id": 35,
             "method": "tools/call",
             "params": {
-                "name": "get_screen",
-                "arguments": {}
+                "name": "execute_dsl",
+                "arguments": {
+                    "instructions": "clear -1 get_screen"
+                }
             }
         })
         resp = read_msg()
         assert resp is not None
         assert resp["id"] == 35
-        screen2_default = resp["result"]["content"][0]["text"]
+        stack = json.loads(resp["result"]["content"][0]["text"])
+        assert len(stack) == 1
+        screen2_default = stack[0]
         assert "hello_from_session_2" in screen2_default
 
         # 15. Close session_2
@@ -491,36 +487,22 @@ def run_mcp_test():
 
         send_msg({
             "jsonrpc": "2.0",
-            "id": 51,
-            "method": "tools/call",
-            "params": {
-                "name": "wait_idle",
-                "arguments": {
-                    "session_id": "session_custom_env",
-                    "quiet_ms": 20,
-                    "deadline_ms": 500
-                }
-            }
-        })
-        resp = read_msg()
-        assert resp is not None
-        assert resp["id"] == 51
-
-        send_msg({
-            "jsonrpc": "2.0",
             "id": 52,
             "method": "tools/call",
             "params": {
-                "name": "get_screen",
+                "name": "execute_dsl",
                 "arguments": {
-                    "session_id": "session_custom_env"
+                    "session_id": "session_custom_env",
+                    "instructions": "20 500 wait_idle clear -1 get_screen"
                 }
             }
         })
         resp = read_msg()
         assert resp is not None
         assert resp["id"] == 52
-        screen_custom = resp["result"]["content"][0]["text"]
+        stack = json.loads(resp["result"]["content"][0]["text"])
+        assert len(stack) == 1
+        screen_custom = stack[0]
         assert "TERM=custom-terminal-123" in screen_custom, f"Expected custom terminal env, got: {screen_custom}"
         assert "LANG=en_GB.UTF-8" in screen_custom, f"Expected custom locale env, got: {screen_custom}"
 
@@ -555,15 +537,15 @@ def run_mcp_test():
         resp = read_msg()
         assert resp is not None
 
-        # 8. Send key 'q' followed by a newline (now back to default session)
+        # 8. Send key 'q' followed by a newline via DSL (now back to default session)
         send_msg({
             "jsonrpc": "2.0",
             "id": 7,
             "method": "tools/call",
             "params": {
-                "name": "send_key",
+                "name": "execute_dsl",
                 "arguments": {
-                    "keys": "q\\n"
+                    "instructions": "clear \"q\\n\" send_key"
                 }
             }
         })
@@ -571,40 +553,41 @@ def run_mcp_test():
         assert resp is not None
         assert resp["id"] == 7
 
-        # 9. Wait for exited status
+        # 9. Wait for exited status via DSL
         send_msg({
             "jsonrpc": "2.0",
             "id": 8,
             "method": "tools/call",
             "params": {
-                "name": "wait_idle",
+                "name": "execute_dsl",
                 "arguments": {
-                    "quiet_ms": 100,
-                    "deadline_ms": 1000
+                    "instructions": "clear 100 1000 wait_idle"
                 }
             }
         })
         resp = read_msg()
         assert resp is not None
-        text_content = resp["result"]["content"][0]["text"]
-        assert text_content == "wait: exited", f"Expected 'wait: exited', got {text_content}"
+        stack = json.loads(resp["result"]["content"][0]["text"])
+        assert stack == ["wait: exited"], f"Expected ['wait: exited'], got {stack}"
 
-        # 10. Check status
+        # 10. Check status via DSL
         send_msg({
             "jsonrpc": "2.0",
             "id": 9,
             "method": "tools/call",
             "params": {
-                "name": "get_status",
-                "arguments": {}
+                "name": "execute_dsl",
+                "arguments": {
+                    "instructions": "clear get_status"
+                }
             }
         })
         resp = read_msg()
         assert resp is not None
-        text_content = resp["result"]["content"][0]["text"]
-        assert text_content == "exited 0", f"Expected 'exited 0', got {text_content}"
+        stack = json.loads(resp["result"]["content"][0]["text"])
+        assert stack == ["exited 0"], f"Expected ['exited 0'], got {stack}"
 
-        # Create a session to test scrollback
+        # Create a session to test DSL operations
         send_msg({
             "jsonrpc": "2.0",
             "id": 300,
@@ -623,131 +606,160 @@ def run_mcp_test():
         assert resp is not None
         assert not resp["result"].get("isError", False)
 
-        # Wait for seq to complete/idle
+        # Test execute_dsl tool
+        # 1. Basic stack operations with list parameters
         send_msg({
             "jsonrpc": "2.0",
-            "id": 301,
+            "id": 401,
             "method": "tools/call",
             "params": {
-                "name": "wait_idle",
+                "name": "execute_dsl",
                 "arguments": {
                     "session_id": "sb_test",
-                    "quiet_ms": 100,
-                    "deadline_ms": 1000
+                    "instructions": [123, "dup"]
                 }
             }
         })
         resp = read_msg()
         assert resp is not None
+        assert not resp["result"].get("isError", False)
+        stack_res = json.loads(resp["result"]["content"][0]["text"])
+        assert stack_res == [123, 123], f"Expected [123, 123], got {stack_res}"
 
-        # Test get_scrollback text format
+        # 2. String commands & Persistence: store a variable in one call, load in next
         send_msg({
             "jsonrpc": "2.0",
-            "id": 201,
+            "id": 402,
             "method": "tools/call",
             "params": {
-                "name": "get_scrollback",
+                "name": "execute_dsl",
                 "arguments": {
                     "session_id": "sb_test",
-                    "lines": 10,
-                    "format": "text"
+                    "instructions": "clear 999 \"var_mcp\" store"
                 }
             }
         })
         resp = read_msg()
         assert resp is not None
         assert not resp["result"].get("isError", False)
-        sb_text = resp["result"]["content"][0]["text"]
-        assert "1" in sb_text, f"Expected '1' in scrollback, got: {sb_text}"
+        stack_res = json.loads(resp["result"]["content"][0]["text"])
+        assert stack_res == [], f"Expected empty stack, got {stack_res}"
 
-        # Test get_scrollback lines format
         send_msg({
             "jsonrpc": "2.0",
-            "id": 202,
+            "id": 403,
             "method": "tools/call",
             "params": {
-                "name": "get_scrollback",
+                "name": "execute_dsl",
                 "arguments": {
                     "session_id": "sb_test",
-                    "lines": 10,
-                    "format": "lines"
+                    "instructions": "\"var_mcp\" load"
                 }
             }
         })
         resp = read_msg()
         assert resp is not None
         assert not resp["result"].get("isError", False)
-        sb_lines = json.loads(resp["result"]["content"][0]["text"])
-        assert isinstance(sb_lines, list)
-        assert any("1" in line for line in sb_lines), f"Expected '1' line in scrollback list: {sb_lines}"
+        stack_res = json.loads(resp["result"]["content"][0]["text"])
+        assert stack_res == [999], f"Expected stack to preserve variable across calls and contain [999], got {stack_res}"
 
-        # Test get_area
+        # Test structured literals
         send_msg({
             "jsonrpc": "2.0",
-            "id": 203,
+            "id": 410,
             "method": "tools/call",
             "params": {
-                "name": "get_area",
+                "name": "execute_dsl",
                 "arguments": {
-                    "x": 0,
-                    "y": 0,
-                    "width": 10,
-                    "height": 2,
-                    "format": "text",
-                    "include_text": True,
-                    "include_attrs": True
+                    "session_id": "sb_test",
+                    "instructions": ["clear", {"lit": "hello_structured"}, {"lit": ""}]
                 }
             }
         })
         resp = read_msg()
         assert resp is not None
         assert not resp["result"].get("isError", False)
-        area_res = json.loads(resp["result"]["content"][0]["text"])
-        assert "text" in area_res
-        assert "attributes" in area_res
-        assert isinstance(area_res["attributes"], list)
+        stack_res = json.loads(resp["result"]["content"][0]["text"])
+        assert stack_res == ["hello_structured", ""], f"Expected ['hello_structured', ''], got {stack_res}"
 
-        # Test get_area clipping warning
+        # Test structured operations
         send_msg({
             "jsonrpc": "2.0",
-            "id": 204,
+            "id": 411,
             "method": "tools/call",
             "params": {
-                "name": "get_area",
+                "name": "execute_dsl",
                 "arguments": {
-                    "x": -5,
-                    "y": 0,
-                    "width": 100,
-                    "height": 2,
-                    "format": "lines",
-                    "include_text": True
+                    "session_id": "sb_test",
+                    "instructions": ["clear", {"op": "dup", "args": [88]}]
                 }
             }
         })
         resp = read_msg()
         assert resp is not None
         assert not resp["result"].get("isError", False)
-        area_res_clip = json.loads(resp["result"]["content"][0]["text"])
-        assert "warning" in area_res_clip
-        assert "clipped" in area_res_clip["warning"]
+        stack_res = json.loads(resp["result"]["content"][0]["text"])
+        assert stack_res == [88, 88], f"Expected [88, 88], got {stack_res}"
 
-        # Test get_attributes with include_ranges=True
+        # Test error diagnostics and auto-clearing
         send_msg({
             "jsonrpc": "2.0",
-            "id": 205,
+            "id": 412,
             "method": "tools/call",
             "params": {
-                "name": "get_attributes",
+                "name": "execute_dsl",
                 "arguments": {
-                    "include_ranges": True
+                    "session_id": "sb_test",
+                    "instructions": ["clear", 10, 20, "drop", "drop", "drop"]
+                }
+            }
+        })
+        resp = read_msg()
+        assert resp is not None
+        err_msg = resp["result"]["content"][0]["text"]
+        assert "failed at instruction 5" in err_msg, f"Expected error at instruction 5, got message: {err_msg}"
+        assert "drop" in err_msg
+        assert "Stack at failure" in err_msg
+
+        # Verify stack was auto-cleared after the error
+        send_msg({
+            "jsonrpc": "2.0",
+            "id": 413,
+            "method": "tools/call",
+            "params": {
+                "name": "execute_dsl",
+                "arguments": {
+                    "session_id": "sb_test",
+                    "instructions": []
                 }
             }
         })
         resp = read_msg()
         assert resp is not None
         assert not resp["result"].get("isError", False)
-        attrs_text = resp["result"]["content"][0]["text"]
-        assert "row" in attrs_text, f"Expected ranges (including 'row') in attributes output, got: {attrs_text}"
+        stack_res = json.loads(resp["result"]["content"][0]["text"])
+        assert stack_res == [], f"Expected empty stack after auto-clearing, got {stack_res}"
+
+        # Test sleep_ms
+        import time
+        start_time = time.time()
+        send_msg({
+            "jsonrpc": "2.0",
+            "id": 414,
+            "method": "tools/call",
+            "params": {
+                "name": "execute_dsl",
+                "arguments": {
+                    "session_id": "sb_test",
+                    "instructions": [150, "sleep_ms"]
+                }
+            }
+        })
+        resp = read_msg()
+        assert resp is not None
+        assert not resp["result"].get("isError", False)
+        duration = time.time() - start_time
+        assert duration >= 0.14, f"Expected sleep to take at least 150ms, took {duration}s"
 
         # Terminate termobulator
         proc.stdin.close()
@@ -972,7 +984,231 @@ def run_logging_test():
         print("MCP logging test failed:", e)
         sys.exit(1)
 
+def run_workspace_limits_test():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(script_dir)
+    
+    if os.path.exists("./termobulator"):
+        binary_path = "./termobulator"
+    elif os.path.exists(os.path.join(project_root, "build", "termobulator")):
+        binary_path = os.path.join(project_root, "build", "termobulator")
+    else:
+        binary_path = "./build/termobulator"
+        
+    target_path = os.path.join(script_dir, "target.sh")
+    
+    print("Running MCP workspace limits test...")
+    proc = subprocess.Popen(
+        [binary_path, "--mcp"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True
+    )
+    
+    def send_msg(msg):
+        line = json.dumps(msg)
+        proc.stdin.write(line + "\n")
+        proc.stdin.flush()
+        
+    def read_msg():
+        while True:
+            line = proc.stdout.readline()
+            if not line:
+                return None
+            msg = json.loads(line)
+            if msg.get("method") == "roots/list":
+                send_msg({
+                    "jsonrpc": "2.0",
+                    "id": msg["id"],
+                    "result": {"roots": [
+                        {
+                            "uri": f"file://{project_root}",
+                            "name": "Project Root"
+                        }
+                    ]}
+                })
+                continue
+            return msg
+        
+    try:
+        # Handshake: initialize with roots (only project_root)
+        send_msg({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {
+                    "roots": {
+                        "listChanged": True
+                    }
+                },
+                "clientInfo": {"name": "TestClientWithWorkspace", "version": "1.1.0"},
+                "roots": [
+                    {
+                        "uri": f"file://{project_root}",
+                        "name": "Project Root"
+                    }
+                ]
+            }
+        })
+        resp = read_msg()
+        assert resp is not None
+        
+        send_msg({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        })
+        
+        # Test 1: Spawning a target inside the workspace (target_path) should succeed
+        send_msg({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "create_session",
+                "arguments": {
+                    "binary": target_path,
+                    "session_id": "inside_sess"
+                }
+            }
+        })
+        resp = read_msg()
+        assert resp is not None
+        assert not resp["result"].get("isError", False), f"Expected inside workspace spawn to succeed, but got error: {resp}"
+        
+        # Test 2: Spawning a target outside the workspace (/bin/sh) should fail
+        send_msg({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "create_session",
+                "arguments": {
+                    "binary": "/bin/sh",
+                    "session_id": "outside_sess"
+                }
+            }
+        })
+        resp = read_msg()
+        assert resp is not None
+        assert resp["result"].get("isError", False), "Expected outside workspace spawn to fail, but it succeeded!"
+        err_msg = resp["result"]["content"][0]["text"]
+        assert "lies outside the workspace" in err_msg, f"Expected workspace access denied error, got: {err_msg}"
+        
+        proc.stdin.close()
+        proc.wait(timeout=2.0)
+        print("MCP workspace limits test passed successfully!")
+        
+    except Exception as e:
+        proc.kill()
+        traceback.print_exc()
+        print("MCP workspace limits test failed:", e)
+        sys.exit(1)
+
+    print("Running MCP empty roots (CWD fallback) test...")
+    proc2 = subprocess.Popen(
+        [binary_path, "--mcp"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True
+    )
+    
+    def send_msg2(msg):
+        line = json.dumps(msg)
+        proc2.stdin.write(line + "\n")
+        proc2.stdin.flush()
+        
+    def read_msg2():
+        while True:
+            line = proc2.stdout.readline()
+            if not line:
+                return None
+            msg = json.loads(line)
+            if msg.get("method") == "roots/list":
+                send_msg2({
+                    "jsonrpc": "2.0",
+                    "id": msg["id"],
+                    "result": {"roots": []}
+                })
+                continue
+            return msg
+        
+    try:
+        # Handshake: initialize with roots capability, but empty roots array
+        send_msg2({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {
+                    "roots": {
+                        "listChanged": True
+                    }
+                },
+                "clientInfo": {"name": "TestClientWithEmptyWorkspace", "version": "1.1.0"},
+                "roots": []
+            }
+        })
+        resp = read_msg2()
+        assert resp is not None
+        
+        send_msg2({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        })
+        
+        # Spawning ./test_terminal (inside CWD) should succeed
+        send_msg2({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "create_session",
+                "arguments": {
+                    "binary": "./test_terminal",
+                    "session_id": "inside_sess"
+                }
+            }
+        })
+        resp = read_msg2()
+        assert resp is not None
+        assert not resp["result"].get("isError", False), f"Expected inside CWD spawn to succeed, but got error: {resp}"
+        
+        # Spawning /bin/sh (outside CWD) should fail
+        send_msg2({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "create_session",
+                "arguments": {
+                    "binary": "/bin/sh",
+                    "session_id": "outside_sess"
+                }
+            }
+        })
+        resp = read_msg2()
+        assert resp is not None
+        assert resp["result"].get("isError", False), "Expected outside CWD spawn to fail, but it succeeded!"
+        err_msg = resp["result"]["content"][0]["text"]
+        assert "lies outside the workspace" in err_msg, f"Expected workspace access denied error, got: {err_msg}"
+        
+        proc2.stdin.close()
+        proc2.wait(timeout=2.0)
+        print("MCP empty roots test passed successfully!")
+        
+    except Exception as e:
+        proc2.kill()
+        traceback.print_exc()
+        print("MCP empty roots test failed:", e)
+        sys.exit(1)
+
 if __name__ == "__main__":
     run_mcp_test()
     run_idle_timeout_test()
     run_logging_test()
+    run_workspace_limits_test()

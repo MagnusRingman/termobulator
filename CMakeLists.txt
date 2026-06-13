@@ -23,7 +23,7 @@ set_target_properties(libtermobulator PROPERTIES
 )
 target_link_libraries(libtermobulator PRIVATE tsm Threads::Threads)
 
-add_executable(termobulator main.cc app_utils.cc app_utils.h interactive_cli.cc interactive_cli.h mcp_server.cc mcp_server.h)
+add_executable(termobulator main.cc app_utils.cc app_utils.h interactive_cli.cc interactive_cli.h mcp_server.cc mcp_server.h dsl_interpreter.cc dsl_interpreter.h)
 target_link_libraries(termobulator PRIVATE libtermobulator Threads::Threads nlohmann_json::nlohmann_json)
 
 # Testing Support
@@ -32,7 +32,11 @@ enable_testing()
 add_executable(test_terminal tests/test_terminal.cc)
 target_link_libraries(test_terminal PRIVATE libtermobulator Threads::Threads)
 
+add_executable(test_dsl tests/test_dsl.cc dsl_interpreter.cc dsl_interpreter.h app_utils.cc app_utils.h)
+target_link_libraries(test_dsl PRIVATE libtermobulator Threads::Threads nlohmann_json::nlohmann_json)
+
 add_test(NAME unit_test COMMAND test_terminal)
+add_test(NAME dsl_test COMMAND test_dsl)
 add_test(NAME integration_test COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration_test.py)
 add_test(NAME mcp_integration_test COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mcp.py)
 

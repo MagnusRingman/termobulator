@@ -57,61 +57,101 @@ termobulator --mcp [options]
 | `close_session` | `session_id` (string, req) | Terminate and close a terminal session. |
 | `list_sessions` | None | List all active sessions and their status/exit status. |
 | `set_active_session` | `session_id` (string, req) | Set the default active session for subsequent tool calls. |
-| `get_screen` | `snapshot_id` (int, opt), `session_id` (string, opt) | Get the raw text contents of the screen. |
-| `get_scrollback` | `lines` (int, req), `format` (string, opt: `"text"` or `"lines"`), `session_id` (string, opt) | Retrieve the scrollback history buffer for a terminal session. |
-| `get_cursor` | `snapshot_id` (int, opt), `session_id` (string, opt) | Get cursor position and visibility state. |
-| `get_cell` | `x` (int, req), `y` (int, req), `snapshot_id` (int, opt), `session_id` (string, opt) | Get character and attributes at specific coordinates. |
-| `get_row` | `row` (int, req), `snapshot_id` (int, opt), `session_id` (string, opt) | Get text contents of a single screen row. |
-| `get_area` | `x` (int, req), `y` (int, req), `width` (int, req), `height` (int, req), `format` (string, opt: `"text"` or `"lines"`), `include_text` (bool, opt), `include_attrs` (bool, opt), `snapshot_id` (int, opt), `session_id` (string, opt) | Retrieve characters and/or attributes from a rectangular area on the screen. |
-| `get_attributes` | `snapshot_id` (int, opt), `attribute_id` (int, opt), `include_ranges` (bool, opt), `session_id` (string, opt) | List unique cell style attributes present in the snapshot, or get ranges where an attribute is active. |
-| `send_key` | `keys` (string, req), `session_id` (string, opt) | Send text/escaped characters to the terminal PTY. |
-| `send_special_key` | `keyname` (string, req), `modifiers` (array, opt), `session_id` (string, opt) | Send a special key (e.g. arrow, enter) with optional modifiers. |
-| `send_signal` | `signal` (int, opt), `session_id` (string, opt) | Send a POSIX signal to the terminal subprocess. |
-| `get_status` | `session_id` (string, opt) | Check whether the child subprocess is running or exited. |
-| `wait_idle` | `quiet_ms` (int, req), `deadline_ms` (int, req), `session_id` (string, opt) | Wait until the screen is idle for `quiet_ms`. |
-| `wait_for_text` | `text` (string, req), `deadline_ms` (int, req), `session_id` (string, opt) | Wait until a specific string is found on the screen. |
-| `find_text` | `text` (string, req), `snapshot_id` (int, opt), `session_id` (string, opt) | Locate all occurrences of a string on the screen. |
-| `take_snapshot` | `session_id` (string, opt) | Capture a snapshot of the screen and return a snapshot ID. |
-| `get_diff` | `snapshot_id_a` (int, req), `snapshot_id_b` (int, opt), `session_id` (string, opt) | Compare two snapshots or compare a snapshot to the current screen. |
-| `resize_terminal` | `width` (int, req), `height` (int, req), `session_id` (string, opt) | Resize the terminal emulator width and height. |
+| `execute_dsl` | `instructions` (array/string, req), `session_id` (string, opt) | Execute a series of DSL instructions on the session's persistent stack machine. |
+
+---
+
+## Domain Specific Language (DSL) Specification
+
+All terminal interaction and state queries are unified under a stack-based DSL execution engine.
+
+### Conceptual Model
+- **Persistent State**: Each terminal session maintains a stack and a variable dictionary between `execute_dsl` calls.
+- **Literals**: Values of types integer, boolean, array, and object are pushed directly onto the stack.
+  - **JSON Array format**: Prefix a literal string with `$` (e.g. `"$myvar"`) to push it as a literal string.
+  - **Structured Literals**: Pushing `{"lit": <value>}` pushes `<value>` directly onto the stack (e.g. `{"lit": "f4"}`).
+  - **Structured Operations**: Pushing `{"op": "<op_name>", "args": [<args>...]}` executes the operation with the specified arguments in order, avoiding manual stack-shuffling.
+- **Operations**: Unprefixed/unquoted strings are executed as operations (verbs) that pop arguments and push results.
+- **Fail-Fast & Auto-Clear**: Any execution error (stack underflow, type mismatch, invalid operation) aborts execution immediately, returning detailed diagnostics (instruction index, failing token, stack state at failure), and automatically clears the session stack to prevent state pollution.
+- **Opaque Snapshots**: A snapshot is an immutable entity stored in the session registry and referenced on the stack as an integer snapshot ID.
+
+### Available Operations
+
+| Operation | Stack Notation | Description |
+| --- | --- | --- |
+| **Stack Manipulation** | | |
+| `dup` | `( x -- x x )` | Duplicate the top item. |
+| `dup2` | `( x y -- x y x y )` | Duplicate the top two items. |
+| `drop` | `( x -- )` | Discard the top item. |
+| `swap` | `( x y -- y x )` | Swap the top two items. |
+| `over` | `( x y -- x y x )` | Duplicate the second item to the top. |
+| `rot` | `( x y z -- y z x )` | Rotate the top three items. |
+| `clear` | `( ... -- )` | Discard all stack elements. |
+| **Control Flow & Execution** | | |
+| `exec` | `( q -- ... )` | Execute the quotation/array `q`. |
+| `if` | `( cond true_q false_q -- ... )` | If `cond` is non-zero/true, execute `true_q`, else execute `false_q`. |
+| `dip` | `( x q -- ... x )` | Pop `x`, execute `q`, and then restore `x`. |
+| `while` | `( cond_q body_q -- ... )` | Loop `body_q` while `cond_q` returns non-zero/true. |
+| **Dictionary (Variables)** | | |
+| `store` | `( val name_str -- )` | Bind `val` to variable name `name_str`. |
+| `load` | `( name_str -- val )` | Retrieve the value of variable `name_str`. |
+| **Logic, Comparison & Math** | | |
+| `not` | `( x -- bool )` | Logical negation of boolean or number. |
+| `equal` | `( x y -- bool )` | Check equality of top two items. |
+| `empty` | `( val -- bool )` | Check if a string, array, or object is empty. |
+| `size` | `( val -- int )` | Length/size of a string, array, or object. |
+| `+` | `( x y -- sum )` | Integer addition. |
+| `-` | `( x y -- diff )` | Integer subtraction. |
+| **Terminal Interaction** | | |
+| `sleep_ms` | `( ms_int -- )` | Delay execution for `ms_int` milliseconds. |
+| `send_key` | `( keys_str -- )` | Send key/character string (supports escapes like `\n`, `\t`, `\xNN`). |
+| `send_special_key` | `( keyname_str modifiers_str -- )` | Send special key (e.g. `"up"`, `"enter"`) with comma-separated modifiers (e.g. `"ctrl,alt"` or `""`). |
+| `send_signal` | `( sig_int -- )` | Send POSIX signal `sig_int` to the child process. |
+| `get_status` | `( -- status_str )` | Push process status (`"running"` or `"exited <code_int>"`). |
+| `wait_idle` | `( quiet_ms deadline_ms -- result_str )` | Wait for terminal idleness. Pushes `"wait: idle"`, `"wait: deadline"`, or `"wait: exited"`. |
+| `wait_for_text` | `( text_str deadline_ms -- result_str )` | Wait for text to appear on screen. Pushes `"wait-for-text: found"`, `"wait-for-text: timeout"`, or `"wait-for-text: exited"`. |
+| **Snapshots & Queries** | | |
+| `take_snapshot` | `( -- snapshot_id )` | Capture screen state, push integer ID. |
+| `get_screen` | `( snapshot_id -- screen_str )` | Get text representation of a snapshot. |
+| `get_cursor` | `( snapshot_id -- col_int row_int visible_bool )` | Push cursor column, row, and visibility. |
+| `get_cell` | `( x_int y_int snapshot_id -- cell_obj )` | Push cell JSON object (char, fg, bg, and attributes). |
+| `get_row` | `( row_int snapshot_id -- row_str )` | Push row text. |
+| `get_attributes` | `( snapshot_id -- attr_list_str )` | Push unique style attributes summary. |
+| `find_text` | `( query_str snapshot_id -- results_arr )` | Search for `query_str`, push array of `{"row": y, "col_start": x, "col_end": x}`. |
+| `get_diff` | `( snapshot_id_b snapshot_id_a -- diff_str )` | Diff two snapshots, older first. Pushes text diff summary. |
 
 ---
 
 ## Command Line Interface (CLI) Mode
 
-If target binary and arguments are specified at startup without `--mcp`, `termobulator` runs in interactive CLI mode:
+If a target binary and arguments are specified at startup without `--mcp`, `termobulator` runs in interactive CLI mode:
 
 ```sh
 termobulator [--width <width>] [--height <height>] [--terminal <term>] [--locale <locale>] <binary> [args...]
 ```
 
-The driver spawns the target binary inside a default 80×24 PTY, reads line-oriented commands from stdin, and writes responses to stdout.
+The driver spawns the target binary inside a default 80×24 PTY, runs a DSL execution loop (REPL) on standard input, and outputs the resulting stack state as a JSON array to stdout.
 
-### CLI Commands
+### CLI Syntax
+- Whitespace separates tokens.
+- `[` and `]`: Form nested quotations/arrays.
+- `"..."`: Parsed as literal strings. Standard backslash escapes (e.g. `\n`, `\t`) are supported.
+- Numeric digits (e.g. `123`, `-5`): Parsed as literal integers.
+- `true` or `false`: Parsed as literal booleans.
+- Unquoted words: Executed as operations.
+- `exit` or `quit`: Exits the CLI REPL.
 
-| Command | Usage | Description |
-| --- | --- | --- |
-| `key` | `key <escaped_str>` | Send characters to PTY. Supports standard backslash escapes (e.g. `\n`, `\t`, `\x1b`). |
-| `special` | `special <keyname> [mods...]` | Send non-printable key with optional modifiers (e.g. `special up ctrl shift`). |
-| `keysyms` | `keysyms` | List available special keysym names. |
-| `screen` | `screen [snapshot_id]` | Dump the formatted text screen (bordered). |
-| `screen-raw` | `screen-raw [snapshot_id]` | Dump raw screen contents row by row without borders or cursor info. |
-| `scrollback` | `scrollback <lines>` | Retrieve the last `<lines>` of scrollback history. |
-| `snapshot` | `snapshot` | Capture the current screen state and return a unique snapshot ID. |
-| `cell` | `cell <y> <x> [snapshot_id]` | Get character at coordinates (x, y). |
-| `row` | `row <y> [snapshot_id]` | Get characters on row `<y>`. |
-| `range` | `range <y> <col_start> <col_end> [snapshot_id]` | Get characters on row `<y>` from column `<col_start>` to `<col_end>`. |
-| `attributes` | `attributes [snapshot_id]` | List unique cell style attributes present in the snapshot. |
-| `attr-map` | `attr-map <attr_id> [snapshot_id]` | Show column ranges on each row where attribute `<attr_id>` is active. |
-| `cursor` | `cursor [snapshot_id]` | Get cursor location (x, y) and visibility status. |
-| `diff` | `diff <snapshot_id>` | Show a text diff of the current screen against snapshot `<snapshot_id>`. |
-| `find` | `find <string> [snapshot_id]` | Locate occurrences of a string in a snapshot or the current display. Supports standard backslash escapes (e.g. `\x20` for space). |
-| `resize` | `resize <width> <height>` | Resize the terminal window. Warns that pre-resize snapshots are incompatible. |
-| `status` | `status` | Get exit/running status of the subprocess. |
-| `wait` | `wait <quiet_ms> <deadline_ms>` | Wait until the PTY is idle (no writes) for `<quiet_ms>` or the `<deadline_ms>` is reached. |
-| `wait-for-text` | `wait-for-text <string> <deadline_ms>` | Wait until the string query appears on the screen or `<deadline_ms>` elapsed. |
-| `kill` | `kill [signal]` | Send a signal (default SIGTERM=15) to the subprocess. |
-| `exit` | `exit` | Exit the CLI driver. |
+#### Example Session:
+```
+> 20 200 wait_idle
+["wait: idle"]
+> clear "q\n" send_key
+[]
+> clear get_status
+["exited 0"]
+> exit
+```
+
 
 ---
 

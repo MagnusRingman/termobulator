@@ -7,6 +7,7 @@ import time
 import traceback
 import sys
 import os
+import json
 
 def run_integration_test():
     # Resolve paths relative to script location to support running both locally and from CTest
@@ -37,18 +38,21 @@ def run_integration_test():
         text=True
     )
     try:
-        proc_size.stdin.write("wait 20 200\n")
-        proc_size.stdin.write("screen\n")
+        proc_size.stdin.write("20 200 wait_idle\n")
+        proc_size.stdin.write("clear -1 get_screen\n")
         proc_size.stdin.flush()
-        wait_out = proc_size.stdout.readline().strip()
-        assert wait_out == "wait: idle", f"Expected 'wait: idle', got '{wait_out}'"
-        lines = []
+        
+        wait_out = json.loads(proc_size.stdout.readline().strip())
+        assert wait_out == ["wait: idle"], f"Expected ['wait: idle'], got '{wait_out}'"
+        
+        screen_out = json.loads(proc_size.stdout.readline().strip())
+        assert len(screen_out) == 1
+        screen_str = screen_out[0]
+        lines = screen_str.split("\n")
         expected_height = 10
-        for _ in range(expected_height + 2):
-            lines.append(proc_size.stdout.readline().strip())
-        assert len(lines[0]) == 42, f"Expected border width 42, got {len(lines[0])}"
-        assert lines[0] == "+" + "-"*40 + "+", f"Invalid border line: {lines[0]}"
-        assert len(lines) == expected_height + 2, f"Expected {expected_height + 2} lines for screen output, got {len(lines)}"
+        assert len(lines) == expected_height, f"Expected {expected_height} lines, got {len(lines)}"
+        assert all(len(line) <= 40 for line in lines), "Expected all lines to be <= 40 characters"
+        
         proc_size.stdin.write("exit\n")
         proc_size.stdin.flush()
         proc_size.wait(timeout=2.0)
@@ -63,135 +67,101 @@ def run_integration_test():
         [binary_path, target_path],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
         text=True
     )
 
-    def read_until(proc, marker, timeout=2.0):
-        lines = []
-        start_time = time.time()
-        while time.time() - start_time < timeout:
-            line = proc.stdout.readline()
-            if not line:
-                break
-            lines.append(line.strip())
-            if marker in line:
-                return lines
-        return lines
-
     try:
-
         # 1. Wait for target to become idle
-        proc.stdin.write("wait 20 200\n")
+        proc.stdin.write("20 200 wait_idle\n")
         proc.stdin.flush()
-        wait_line1 = proc.stdout.readline().strip()
-        assert wait_line1 == "wait: idle", f"Expected 'wait: idle', got '{wait_line1}'"
+        wait_line1 = json.loads(proc.stdout.readline().strip())
+        assert wait_line1 == ["wait: idle"], f"Expected ['wait: idle'], got '{wait_line1}'"
         
-        # Test screen-raw
-        proc.stdin.write("screen-raw\n")
+        # Test get_screen
+        proc.stdin.write("clear -1 get_screen\n")
         proc.stdin.flush()
-        raw_lines = []
-        for _ in range(24):
-            raw_lines.append(proc.stdout.readline().strip())
-        assert raw_lines[0].startswith("READY"), f"Expected line to start with READY, got: {raw_lines[0]}"
-        assert not any(l.startswith("|") for l in raw_lines), "screen-raw output should not contain borders"
+        screen_res = json.loads(proc.stdout.readline().strip())
+        assert len(screen_res) == 1
+        screen_str = screen_res[0]
+        lines = screen_str.split("\n")
+        assert len(lines) == 24
+        assert lines[0].startswith("READY"), f"Expected line to start with READY, got: {lines[0]}"
 
-        # Test wait-for-text found
-        proc.stdin.write("wait-for-text READY 500\n")
+        # Test wait_for_text found
+        proc.stdin.write("clear \"READY\" 500 wait_for_text\n")
         proc.stdin.flush()
-        wft_found = proc.stdout.readline().strip()
-        assert wft_found == "wait-for-text: found", f"Expected 'wait-for-text: found', got '{wft_found}'"
+        wft_found = json.loads(proc.stdout.readline().strip())
+        assert wft_found == ["wait-for-text: found"], f"Expected ['wait-for-text: found'], got '{wft_found}'"
 
-        # Test wait-for-text timeout
-        proc.stdin.write("wait-for-text NOTPRESENT 50\n")
+        # Test wait_for_text timeout
+        proc.stdin.write("clear \"NOTPRESENT\" 50 wait_for_text\n")
         proc.stdin.flush()
-        wft_timeout = proc.stdout.readline().strip()
-        assert wft_timeout == "wait-for-text: timeout", f"Expected 'wait-for-text: timeout', got '{wft_timeout}'"
+        wft_timeout = json.loads(proc.stdout.readline().strip())
+        assert wft_timeout == ["wait-for-text: timeout"], f"Expected ['wait-for-text: timeout'], got '{wft_timeout}'"
 
         # Test find command
-        proc.stdin.write("find READY\n")
-        proc.stdin.write("status\n")
+        proc.stdin.write("clear \"READY\" -1 find_text\n")
         proc.stdin.flush()
-        find_lines = read_until(proc, "running")
-        print("Find output:", find_lines)
-        assert "row 0 col 0-4" in find_lines, "Expected 'row 0 col 0-4' in find output"
+        find_res = json.loads(proc.stdout.readline().strip())
+        assert len(find_res) == 1
+        assert find_res[0][0]["row"] == 0
+        assert find_res[0][0]["col_start"] == 0
+
+        # Test take_snapshot
+        proc.stdin.write("clear take_snapshot\n")
+        proc.stdin.flush()
+        snap_res = json.loads(proc.stdout.readline().strip())
+        assert snap_res == [0], f"Expected [0], got '{snap_res}'"
 
         # Test find with snapshot
-        proc.stdin.write("snapshot\n")
+        proc.stdin.write("clear \"READY\" 0 find_text\n")
         proc.stdin.flush()
-        snap_line = proc.stdout.readline().strip()
-        print("Snapshot line:", snap_line)
-        assert snap_line == "snapshot 0", f"Expected 'snapshot 0', got '{snap_line}'"
-
-        proc.stdin.write("find READY 0\n")
-        proc.stdin.write("status\n")
-        proc.stdin.flush()
-        find_snap_lines = read_until(proc, "running")
-        print("Find snap output:", find_snap_lines)
-        assert "row 0 col 0-4" in find_snap_lines, "Expected 'row 0 col 0-4' in find snap output"
+        find_snap_res = json.loads(proc.stdout.readline().strip())
+        assert find_snap_res[0][0]["row"] == 0
+        assert find_snap_res[0][0]["col_start"] == 0
 
         # Test find with non-existent string
-        proc.stdin.write("find NONEXISTENT\n")
-        proc.stdin.write("status\n")
+        proc.stdin.write("clear \"NONEXISTENT\" -1 find_text\n")
         proc.stdin.flush()
-        find_empty_lines = read_until(proc, "running")
-        print("Find empty output:", find_empty_lines)
-        assert "not found" in find_empty_lines, "Expected 'not found' in find empty output"
+        find_empty_res = json.loads(proc.stdout.readline().strip())
+        assert find_empty_res == [[]], f"Expected [[]], got '{find_empty_res}'"
 
-        # Test find with empty string
-        proc.stdin.write("find \"\"\n")
-        proc.stdin.write("status\n")
+        # Test find with empty string (errors out)
+        proc.stdin.write("clear \"\" -1 find_text\n")
         proc.stdin.flush()
-        find_empty_q_lines = read_until(proc, "running")
-        print("Find empty query output:", find_empty_q_lines)
-        assert "empty query" in find_empty_q_lines, "Expected 'empty query' in find empty query output"
-
-        # Test keysyms command
-        proc.stdin.write("keysyms\n")
-        proc.stdin.write("status\n")
-        proc.stdin.flush()
-        keysyms_lines = read_until(proc, "running")
-        print("Keysyms output:", keysyms_lines)
-        assert len(keysyms_lines) >= 2, "Expected output from keysyms command"
-        assert "space" in keysyms_lines[0], "Expected 'space' keysym in keysyms output"
-
-        # Test attr-map with description
-        proc.stdin.write("attr-map \"fg=16 bg=17\" 0\n")
-        proc.stdin.write("status\n")
-        proc.stdin.flush()
-        attr_map_lines = read_until(proc, "running")
-        print("Attr map output:", attr_map_lines)
-        assert any("row 0: col" in l for l in attr_map_lines), "Expected row 0 ranges in attr-map output"
+        err_line = proc.stderr.readline().strip()
+        assert "Empty search query" in err_line, f"Expected 'Empty search query' in stderr, got '{err_line}'"
 
         # Send key 'q' followed by a newline to flush canonical mode input
-        proc.stdin.write("key q\\n\n")
+        proc.stdin.write("clear \"q\\n\" send_key\n")
         proc.stdin.flush()
+        send_key_res = json.loads(proc.stdout.readline().strip())
+        assert send_key_res == [], f"Expected empty stack, got {send_key_res}"
 
         # Wait for exit and dump status
-        proc.stdin.write("wait 100 1000\n")
+        proc.stdin.write("clear 100 1000 wait_idle\n")
         proc.stdin.flush()
-        wait_line2 = proc.stdout.readline().strip()
-        assert wait_line2 == "wait: exited", f"Expected 'wait: exited', got '{wait_line2}'"
+        wait_line2 = json.loads(proc.stdout.readline().strip())
+        assert wait_line2 == ["wait: exited"], f"Expected ['wait: exited'], got '{wait_line2}'"
 
         # Take snapshot 1 after exit
-        proc.stdin.write("snapshot\n")
+        proc.stdin.write("clear take_snapshot\n")
         proc.stdin.flush()
-        snap_line1 = proc.stdout.readline().strip()
-        assert snap_line1 == "snapshot 1", f"Expected 'snapshot 1', got '{snap_line1}'"
+        snap_line1 = json.loads(proc.stdout.readline().strip())
+        assert snap_line1 == [1], f"Expected [1], got '{snap_line1}'"
 
         # Test snapshot-to-snapshot diff
-        proc.stdin.write("diff 0 1\n")
-        proc.stdin.write("status\n")
+        proc.stdin.write("clear 0 1 get_diff\n")
         proc.stdin.flush()
-        diff_lines = read_until(proc, "exited 0")
-        print("Diff output:", diff_lines)
-        assert any("row 0" in l for l in diff_lines), "Expected row 0 change in diff output"
+        diff_res = json.loads(proc.stdout.readline().strip())
+        assert any("row 0" in l for l in diff_res), "Expected row 0 change in diff output"
 
-        proc.stdin.write("status\n")
+        # Test get_status
+        proc.stdin.write("clear get_status\n")
         proc.stdin.flush()
-        status_line = proc.stdout.readline().strip()
-        print("Status output:", status_line)
-        assert status_line == "exited 0", f"Expected 'exited 0', got '{status_line}'"
+        status_line = json.loads(proc.stdout.readline().strip())
+        assert status_line == ["exited 0"], f"Expected ['exited 0'], got '{status_line}'"
 
         # 5. Tell termobulator to exit
         proc.stdin.write("exit\n")
@@ -215,22 +185,31 @@ def run_integration_test():
         text=True
     )
     try:
-        proc_space.stdin.write("wait 20 200\n")
+        proc_space.stdin.write("20 200 wait_idle\n")
         proc_space.stdin.flush()
-        wait_idle = proc_space.stdout.readline().strip()
-        assert wait_idle == "wait: idle", f"Expected 'wait: idle', got '{wait_idle}'"
+        wait_idle = json.loads(proc_space.stdout.readline().strip())
+        assert wait_idle == ["wait: idle"], f"Expected ['wait: idle'], got '{wait_idle}'"
         
-        proc_space.stdin.write("special space\n")
-        proc_space.stdin.write("key \\n\n")
-        proc_space.stdin.write("wait 100 1000\n")
-        proc_space.stdin.write("status\n")
+        proc_space.stdin.write("clear \"space\" \"\" send_special_key\n")
         proc_space.stdin.flush()
+        res1 = json.loads(proc_space.stdout.readline().strip())
+        assert res1 == []
         
-        wait_result = proc_space.stdout.readline().strip()
-        assert wait_result in ("wait: exited", "wait: idle"), f"Expected wait result, got '{wait_result}'"
-        status_line = proc_space.stdout.readline().strip()
+        proc_space.stdin.write("clear \"\\n\" send_key\n")
+        proc_space.stdin.flush()
+        res2 = json.loads(proc_space.stdout.readline().strip())
+        assert res2 == []
+        
+        proc_space.stdin.write("clear 100 1000 wait_idle\n")
+        proc_space.stdin.flush()
+        wait_result = json.loads(proc_space.stdout.readline().strip())
+        assert wait_result in (["wait: exited"], ["wait: idle"]), f"Expected wait result, got '{wait_result}'"
+        
+        proc_space.stdin.write("clear get_status\n")
+        proc_space.stdin.flush()
+        status_line = json.loads(proc_space.stdout.readline().strip())
         print("Space test status output:", status_line)
-        assert status_line == "exited 1", f"Expected 'exited 1', got '{status_line}'"
+        assert status_line == ["exited 1"], f"Expected ['exited 1'], got '{status_line}'"
         
         proc_space.stdin.write("exit\n")
         proc_space.stdin.flush()

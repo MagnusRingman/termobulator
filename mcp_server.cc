@@ -6,7 +6,10 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <climits>
+#include <cstdlib>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <utility>
 
@@ -136,6 +139,15 @@ void McpServer::ProcessMcpMessage(const json& msg) {
     }
 
     if (!msg.contains("method")) {
+        if (msg.contains("id") && msg["id"] == "get_roots") {
+            if (msg.contains("result") && msg["result"].contains("roots")) {
+                ParseRoots(msg["result"]["roots"]);
+            } else if (msg.contains("error")) {
+                WriteLog("ERROR",
+                         "Failed to retrieve roots: " + msg["error"].dump());
+            }
+            return;
+        }
         SendJsonRpcError(msg.contains("id") ? msg["id"] : nullptr, -32600,
                          "Invalid Request: missing method");
         return;
@@ -158,6 +170,8 @@ void McpServer::ProcessMcpMessage(const json& msg) {
         HandleInitialize(id, msg);
     } else if (method == "notifications/initialized") {
         HandleInitialized(msg);
+    } else if (method == "notifications/roots/list_changed") {
+        HandleRootsListChanged(msg);
     } else if (!initialized_) {
         if (has_id) {
             SendJsonRpcError(id, -32002, "Server not initialized");
@@ -175,6 +189,15 @@ void McpServer::ProcessMcpMessage(const json& msg) {
 
 void McpServer::HandleInitialize(const json& id, const json& req) {
     initialize_received_ = true;
+    if (req.contains("params") && req["params"].contains("capabilities")) {
+        const auto& caps = req["params"]["capabilities"];
+        if (caps.contains("roots")) {
+            client_supports_roots_ = true;
+        }
+    }
+    if (req.contains("params") && req["params"].contains("roots")) {
+        ParseRoots(req["params"]["roots"]);
+    }
     json resp;
     resp["jsonrpc"] = "2.0";
     resp["id"] = id;
@@ -182,12 +205,108 @@ void McpServer::HandleInitialize(const json& id, const json& req) {
     resp["result"]["capabilities"]["tools"] = json::object();
     resp["result"]["serverInfo"]["name"] = "termobulator";
     resp["result"]["serverInfo"]["version"] = "1.1.0";
+    resp["result"]["instructions"] =
+        "This server manages terminal sessions and provides tools to interact "
+        "with them.\n"
+        "The `execute_dsl` tool executes a series of instructions on a "
+        "session's persistent stack machine.\n\n"
+        "### DSL Conceptual Model\n"
+        "- **Persistent State**: Each terminal session maintains a stack and "
+        "a variable dictionary between `execute_dsl` calls.\n"
+        "- **Literals**: Values of types integer, boolean, array, and object "
+        "are pushed directly onto the stack.\n"
+        "- **Structured Literals**: Pushing {\"lit\": <value>} directly "
+        "pushes <value> (e.g. {\"lit\": \"f4\"} or {\"lit\": \"\"}) without "
+        "evaluating it or needing escapes.\n"
+        "- **Structured Operations**: Pushing {\"op\": \"<op_name>\", "
+        "\"args\": [<lit_args>...]} evaluates the operation with the given "
+        "literal arguments in order, avoiding stack-shuffling.\n"
+        "- **Escape Prefix**: In a JSON array, prefixing a string with '$' "
+        "(e.g. '$myvar') pushes it as a literal string. In a text string, "
+        "wrap it in double quotes (e.g. \\\"myvar\\\").\n"
+        "- **Operations**: Unprefixed/unquoted strings are executed as "
+        "operations (verbs) that pop arguments and push results.\n"
+        "- **Fail-Fast & Auto-Clear**: Any error (stack underflow, type "
+        "mismatch, invalid operation) aborts execution immediately, returning "
+        "a detailed error message, and automatically clears the stack of the "
+        "session.\n"
+        "- **Opaque Snapshots**: A snapshot is an immutable entity stored in "
+        "the session registry and referenced on the stack as an integer "
+        "snapshot ID.\n\n"
+        "### DSL Available Operations\n"
+        "- `dup` `( x -- x x )`: Duplicate top item.\n"
+        "- `dup2` `( x y -- x y x y )`: Duplicate top two items.\n"
+        "- `drop` `( x -- )`: Discard top item.\n"
+        "- `swap` `( x y -- y x )`: Swap top two items.\n"
+        "- `over` `( x y -- x y x )`: Duplicate second item to top.\n"
+        "- `rot` `( x y z -- y z x )`: Rotate top three items.\n"
+        "- `clear` `( ... -- )`: Discard all stack elements.\n"
+        "- `store` `( val name_str -- )`: Bind value to variable name.\n"
+        "- `load` `( name_str -- val )`: Retrieve value of variable name.\n"
+        "- `exec` `( q -- ... )`: Execute quotation/array `q`.\n"
+        "- `if` `( cond true_q false_q -- ... )`: If cond is non-zero/true "
+        "execute true_q, else false_q.\n"
+        "- `dip` `( x q -- ... x )`: Pop x, execute q, restore x.\n"
+        "- `while` `( cond_q body_q -- ... )`: Loop body_q while cond_q "
+        "returns true/non-zero.\n"
+        "- `not` `( x -- bool )`: Logical negation.\n"
+        "- `equal` `( x y -- bool )`: Check equality.\n"
+        "- `empty` `( val -- bool )`: Check if string/array/object is empty.\n"
+        "- `size` `( val -- int )`: Length of string/array/object.\n"
+        "- `sleep_ms` `( ms_int -- )`: Sleep/delay execution for ms_int "
+        "milliseconds.\n"
+        "- `send_key` `( keys_str -- )`: Send key string (supports escapes "
+        "like \\n, \\t, \\xNN).\n"
+        "- `send_special_key` `( keyname_str modifiers_str -- )`: Send "
+        "special key with comma-separated modifiers (e.g. 'ctrl,alt' or '').\n"
+        "  * **Supported Key Names**: `up`, `down`, `left`, `right`, `f1` to "
+        "`f20`, `backspace`, `tab`, `enter`/`return`, `escape`/`esc`, "
+        "`insert`, `delete`/`del`, `home`, `end`, `pageup`/`pgup`, "
+        "`pagedown`/`pgdn`, `space`, and keypad keys (e.g. `kp_enter`).\n"
+        "  * **Supported Modifiers**: `shift`, `ctrl`/`control`, "
+        "`alt`/`meta`.\n"
+        "- `send_signal` `( sig_int -- )`: Send POSIX signal to child "
+        "process.\n"
+        "- `get_status` `( -- status_str )`: Push status ('running' or "
+        "'exited <code_int>').\n"
+        "- `wait_idle` `( quiet_ms deadline_ms -- result_str )`: Wait for "
+        "terminal to be idle. Pushes 'wait: idle', 'wait: deadline', or "
+        "'wait: exited'.\n"
+        "- `wait_for_text` `( text_str deadline_ms -- result_str )`: Wait for "
+        "text to appear. Pushes 'wait-for-text: found', 'wait-for-text: "
+        "timeout', or 'wait-for-text: exited'.\n"
+        "- `take_snapshot` `( -- snapshot_id )`: Capture screen state, push "
+        "ID.\n"
+        "- `get_screen` `( snapshot_id -- screen_str )`: Get screen text of "
+        "snapshot.\n"
+        "- `get_cursor` `( snapshot_id -- col_int row_int visible_bool )`: "
+        "Push cursor column, row, and visibility.\n"
+        "- `get_cell` `( x_int y_int snapshot_id -- cell_obj )`: Push cell "
+        "JSON object (char, fg, bg, and attributes).\n"
+        "- `get_row` `( row_int snapshot_id -- row_str )`: Push text of "
+        "single row.\n"
+        "- `get_attributes` `( snapshot_id -- attr_list_str )`: Push list of "
+        "unique formatting attributes.\n"
+        "- `find_text` `( query_str snapshot_id -- results_arr )`: Find "
+        "query, push array of `{\"row\": y, \"col_start\": x, \"col_end\": "
+        "x}`.\n"
+        "- `get_diff` `( snapshot_id_b snapshot_id_a -- diff_str )`: Diff "
+        "snapshots, older first. Pushes text summary of difference.";
     SendJson(resp);
 }
 
 void McpServer::HandleInitialized(const json& req) {
     if (initialize_received_) {
         initialized_ = true;
+        bool should_request = false;
+        {
+            std::lock_guard<std::mutex> lock(sessions_mutex_);
+            should_request =
+                client_supports_roots_ && workspace_roots_.empty();
+        }
+        if (should_request) {
+            RequestRoots();
+        }
     }
 }
 
@@ -213,6 +332,36 @@ std::shared_ptr<termobulator::unstable::Terminal> McpServer::GetTargetSession(
     }
 }
 
+std::shared_ptr<termobulator::unstable::Interpreter> McpServer::GetInterpreter(
+    const json& args) {
+    std::lock_guard<std::mutex> lock(sessions_mutex_);
+    std::string sess_id;
+    if (args.contains("session_id")) {
+        sess_id = args.at("session_id").get<std::string>();
+    } else {
+        sess_id = active_session_id_;
+    }
+    if (sess_id.empty()) {
+        throw std::runtime_error(
+            "No active session. Please create a session using create_session "
+            "first.");
+    }
+    auto it_term = sessions_.find(sess_id);
+    if (it_term == sessions_.end()) {
+        throw std::runtime_error("Session not found: " + sess_id);
+    }
+    sessions_last_activity_[sess_id] = std::chrono::steady_clock::now();
+
+    auto it_interp = interpreters_.find(sess_id);
+    if (it_interp == interpreters_.end()) {
+        auto interp = std::make_shared<termobulator::unstable::Interpreter>(
+            it_term->second.get());
+        interpreters_[sess_id] = interp;
+        return interp;
+    }
+    return it_interp->second;
+}
+
 void McpServer::CloseSessionInternal(const std::string& sess_id) {
     auto it = sessions_.find(sess_id);
     if (it != sessions_.end()) {
@@ -221,6 +370,10 @@ void McpServer::CloseSessionInternal(const std::string& sess_id) {
         }
         sessions_.erase(it);
         sessions_last_activity_.erase(sess_id);
+    }
+    auto it_interp = interpreters_.find(sess_id);
+    if (it_interp != interpreters_.end()) {
+        interpreters_.erase(it_interp);
     }
     if (active_session_id_ == sess_id) {
         if (!sessions_.empty()) {
@@ -231,1013 +384,230 @@ void McpServer::CloseSessionInternal(const std::string& sess_id) {
     }
 }
 
-const std::vector<McpServer::Tool>& McpServer::GetTools() {
-    static const std::vector<Tool> kTools = {
-        {"get_screen",
-         "Get the raw text contents of the screen.",
-         {{"snapshot_id",
-           {{"type", "integer"},
-            {"description",
-             "Optional ID of a snapshot to read from. Use -1 or omit for the "
-             "current active screen."}}},
-          {"session_id",
-           {{"type", "string"},
-            {"description",
-             "Optional session ID to target. If omitted, targets the "
-             "currently active session."}}}},
-         {},
-         [](McpServer* server, const json& args) -> json {
-             int snap_id = args.contains("snapshot_id")
-                               ? args["snapshot_id"].get<int>()
-                               : -1;
-             ScreenSnapshot snap =
-                 server->GetTargetSession(args)->GetSnapshot(snap_id);
-             std::string screen_str;
-             for (unsigned int y = 0; y < snap.height; ++y) {
-                 if (y > 0) screen_str += "\n";
-                 std::string row_str = app_utils::GetRow(snap, y);
-                 size_t endpos = row_str.find_last_not_of(" \t\r\n");
-                 if (endpos != std::string::npos) {
-                     screen_str += row_str.substr(0, endpos + 1);
-                 }
-             }
-             return {{"content", json::array({{{"type", "text"},
-                                               {"text", screen_str}}})}};
-         }},
-        {"get_cursor",
-         "Get the cursor position and visibility state.",
-         {{"snapshot_id",
-           {{"type", "integer"},
-            {"description",
-             "Optional ID of a snapshot to read from. Use -1 or omit for the "
-             "current active screen."}}},
-          {"session_id",
-           {{"type", "string"},
-            {"description",
-             "Optional session ID to target. If omitted, targets the "
-             "currently active session."}}}},
-         {},
-         [](McpServer* server, const json& args) -> json {
-             int snap_id = args.contains("snapshot_id")
-                               ? args["snapshot_id"].get<int>()
-                               : -1;
-             ScreenSnapshot snap =
-                 server->GetTargetSession(args)->GetSnapshot(snap_id);
-             json cursor_json = {{"col", snap.cursor_x},
-                                 {"row", snap.cursor_y},
-                                 {"visible", !snap.cursor_hidden}};
-             return {
-                 {"content", json::array({{{"type", "text"},
-                                           {"text", cursor_json.dump()}}})}};
-         }},
-        {"get_cell",
-         "Get the character and attributes at specific cell coordinates.",
-         {{"x",
-           {{"type", "integer"},
-            {"description", "X coordinate (column, 0-indexed)"}}},
-          {"y",
-           {{"type", "integer"},
-            {"description", "Y coordinate (row, 0-indexed)"}}},
-          {"snapshot_id",
-           {{"type", "integer"},
-            {"description", "Optional snapshot ID to query."}}},
-          {"session_id",
-           {{"type", "string"},
-            {"description",
-             "Optional session ID to target. If omitted, targets the "
-             "currently active session."}}}},
-         {"x", "y"},
-         [](McpServer* server, const json& args) -> json {
-             if (!args.contains("x"))
-                 throw std::runtime_error("Missing required parameter: x");
-             if (!args.contains("y"))
-                 throw std::runtime_error("Missing required parameter: y");
-             int x = args.at("x").get<int>();
-             int y = args.at("y").get<int>();
-             int snap_id = args.contains("snapshot_id")
-                               ? args["snapshot_id"].get<int>()
-                               : -1;
-             ScreenSnapshot snap =
-                 server->GetTargetSession(args)->GetSnapshot(snap_id);
-             if (y >= static_cast<int>(snap.height) ||
-                 x >= static_cast<int>(snap.width) || y < 0 || x < 0) {
-                 throw std::runtime_error("Coordinates out of range");
-             }
-             const auto& cell = snap.cells[y * snap.width + x];
-             CellAttr attr = cell.attr;
-             json cell_json = {
-                 {"char", cell.ch},
-                 {"fg", app_utils::FormatColor(attr.fccode, attr.fr, attr.fg,
-                                               attr.fb)},
-                 {"bg", app_utils::FormatColor(attr.bccode, attr.br, attr.bg,
-                                               attr.bb)},
-                 {"bold", attr.bold},
-                 {"italic", attr.italic},
-                 {"underline", attr.underline},
-                 {"inverse", attr.inverse},
-                 {"protect", attr.protect},
-                 {"blink", attr.blink}};
-             return {{"content", json::array({{{"type", "text"},
-                                               {"text", cell_json.dump()}}})}};
-         }},
-        {"get_row",
-         "Get the text contents of a single screen row.",
-         {{"row",
-           {{"type", "integer"}, {"description", "Row index (0-indexed)"}}},
-          {"snapshot_id",
-           {{"type", "integer"},
-            {"description", "Optional ID of a snapshot to read from."}}},
-          {"session_id",
-           {{"type", "string"},
-            {"description",
-             "Optional session ID to target. If omitted, targets the "
-             "currently active session."}}}},
-         {"row"},
-         [](McpServer* server, const json& args) -> json {
-             if (!args.contains("row"))
-                 throw std::runtime_error("Missing required parameter: row");
-             int y = args.at("row").get<int>();
-             int snap_id = args.contains("snapshot_id")
-                               ? args["snapshot_id"].get<int>()
-                               : -1;
-             ScreenSnapshot snap =
-                 server->GetTargetSession(args)->GetSnapshot(snap_id);
-             if (y >= static_cast<int>(snap.height) || y < 0) {
-                 throw std::runtime_error("Row index out of range: " +
-                                          std::to_string(y));
-             }
-             std::string row_str = app_utils::GetRow(snap, y);
-             size_t endpos = row_str.find_last_not_of(" \t\r\n");
-             if (endpos != std::string::npos) {
-                 row_str = row_str.substr(0, endpos + 1);
-             } else {
-                 row_str.clear();
-             }
-             return {{"content",
-                      json::array({{{"type", "text"}, {"text", row_str}}})}};
-         }},
-        {"get_attributes",
-         "Get unique terminal attributes present on the screen or show row "
-         "column ranges for a specific attribute.",
-         {{"snapshot_id",
-           {{"type", "integer"}, {"description", "Optional snapshot ID."}}},
-          {"attribute_id",
-           {{"type", "integer"},
-            {"description",
-             "Optional attribute ID to show active ranges on each row. "
-             "Attribute IDs returned by this tool are only stable for a fixed "
-             "snapshot. Always use `take_snapshot` first and pass the same "
-             "`snapshot_id` to both the listing call and the range-query "
-             "call."}}},
-          {"include_ranges",
-           {{"type", "boolean"},
-            {"description",
-             "Optional boolean (default false). If true, include the per-row "
-             "ranges where each attribute is active on the screen."}}},
-          {"session_id",
-           {{"type", "string"},
-            {"description",
-             "Optional session ID to target. If omitted, targets the "
-             "currently active session."}}}},
-         {},
-         [](McpServer* server, const json& args) -> json {
-             if (args.contains("attribute_id") &&
-                 !args.contains("snapshot_id")) {
-                 throw std::runtime_error(
-                     "snapshot_id is required when attribute_id is supplied.");
-             }
-             int snap_id = args.contains("snapshot_id")
-                               ? args["snapshot_id"].get<int>()
-                               : -1;
-             bool include_ranges = args.contains("include_ranges")
-                                       ? args["include_ranges"].get<bool>()
-                                       : false;
-             ScreenSnapshot snap =
-                 server->GetTargetSession(args)->GetSnapshot(snap_id);
-             std::string out;
-             if (args.contains("attribute_id")) {
-                 int attr_id = args["attribute_id"].get<int>();
-                 auto unique_attrs = app_utils::GetUniqueAttrs(snap);
-                 if (attr_id < 0 ||
-                     static_cast<size_t>(attr_id) >= unique_attrs.size()) {
-                     throw std::runtime_error("Invalid attribute ID");
-                 }
-                 CellAttr target_attr = unique_attrs[attr_id];
-                 for (unsigned int y = 0; y < snap.height; ++y) {
-                     std::vector<std::string> ranges;
-                     unsigned int cx = 0;
-                     while (cx < snap.width) {
-                         if (snap.cells[y * snap.width + cx].attr ==
-                             target_attr) {
-                             unsigned int x_start = cx;
-                             while (cx < snap.width &&
-                                    snap.cells[y * snap.width + cx].attr ==
-                                        target_attr) {
-                                 cx++;
-                             }
-                             ranges.push_back(std::to_string(x_start) + "-" +
-                                              std::to_string(cx - 1));
-                         } else {
-                             cx++;
-                         }
-                     }
-                     if (!ranges.empty()) {
-                         out += "row " + std::to_string(y) + ": col ";
-                         for (size_t i = 0; i < ranges.size(); ++i) {
-                             if (i > 0) out += ", ";
-                             out += ranges[i];
-                         }
-                         out += "\n";
-                     }
-                 }
-             } else {
-                 auto unique_attrs = app_utils::GetUniqueAttrs(snap);
-                 for (size_t i = 0; i < unique_attrs.size(); ++i) {
-                     out += std::to_string(i) + ": " +
-                            app_utils::FormatAttr(unique_attrs[i]) + "\n";
-                     if (include_ranges) {
-                         CellAttr target_attr = unique_attrs[i];
-                         for (unsigned int y = 0; y < snap.height; ++y) {
-                             std::vector<std::string> ranges;
-                             unsigned int cx = 0;
-                             while (cx < snap.width) {
-                                 if (snap.cells[y * snap.width + cx].attr ==
-                                     target_attr) {
-                                     unsigned int x_start = cx;
-                                     while (cx < snap.width &&
-                                            snap.cells[y * snap.width + cx]
-                                                    .attr == target_attr) {
-                                         cx++;
-                                     }
-                                     ranges.push_back(std::to_string(x_start) +
-                                                      "-" +
-                                                      std::to_string(cx - 1));
-                                 } else {
-                                     cx++;
-                                 }
-                             }
-                             if (!ranges.empty()) {
-                                 out +=
-                                     "  row " + std::to_string(y) + ": col ";
-                                 for (size_t r = 0; r < ranges.size(); ++r) {
-                                     if (r > 0) out += ", ";
-                                     out += ranges[r];
-                                 }
-                                 out += "\n";
-                             }
-                         }
-                     }
-                 }
-             }
-             return {{"content",
-                      json::array({{{"type", "text"}, {"text", out}}})}};
-         }},
-        {"send_key",
-         "Send text/characters (including escaped sequences) to the terminal "
-         "process.",
-         {{"keys",
-           {{"type", "string"},
-            {"description",
-             "The text to send to PTY. Supports backslash escape sequences "
-             "like \\n, \\r, \\t, \\\\, \\xNN (hex), and \\NNN (octal)."}}},
-          {"session_id",
-           {{"type", "string"},
-            {"description",
-             "Optional session ID to target. If omitted, targets the "
-             "currently active session."}}}},
-         {"keys"},
-         [](McpServer* server, const json& args) -> json {
-             if (!args.contains("keys"))
-                 throw std::runtime_error("Missing required parameter: keys");
-             std::string keys = args.at("keys").get<std::string>();
-             server->GetTargetSession(args)->SendRawBytes(
-                 Terminal::ParseEscapes(keys));
-             return {{"content", json::array({{{"type", "text"},
-                                               {"text", "Keys sent."}}})}};
-         }},
-        {"send_special_key",
-         "Send a special key (e.g. arrows, enter, escape, backspace) with "
-         "optional modifiers.",
-         {{"keyname",
-           {{"type", "string"},
-            {"description",
-             "The key name (e.g. \"up\", \"down\", \"left\", \"right\", "
-             "\"enter\", \"escape\", \"backspace\", \"tab\")"}}},
-          {"modifiers",
-           {{"type", "array"},
-            {"items", {{"type", "string"}}},
-            {"description",
-             "Optional list of modifier keys (e.g. \"ctrl\", \"shift\", "
-             "\"alt\")"}}},
-          {"session_id",
-           {{"type", "string"},
-            {"description",
-             "Optional session ID to target. If omitted, targets the "
-             "currently active session."}}}},
-         {"keyname"},
-         [](McpServer* server, const json& args) -> json {
-             if (!args.contains("keyname"))
-                 throw std::runtime_error(
-                     "Missing required parameter: keyname");
-             std::string keyname = args.at("keyname").get<std::string>();
-             uint32_t keysym = Terminal::ParseKeysym(keyname);
-             if (keysym == 0) {
-                 throw std::runtime_error("Unknown keyname: " + keyname);
-             }
-             unsigned int mods = 0;
-             if (args.contains("modifiers")) {
-                 std::vector<std::string> mod_list =
-                     args["modifiers"].get<std::vector<std::string>>();
-                 mods = Terminal::ParseMods(mod_list, 0);
-             }
-             server->GetTargetSession(args)->SendKey(keysym, mods);
-             return {
-                 {"content", json::array({{{"type", "text"},
-                                           {"text", "Special key sent."}}})}};
-         }},
-        {"send_signal",
-         "Send a POSIX signal to the child terminal process.",
-         {{"signal",
-           {{"type", "integer"},
-            {"description", "POSIX signal number (default: 15 = SIGTERM)"}}},
-          {"session_id",
-           {{"type", "string"},
-            {"description",
-             "Optional session ID to target. If omitted, targets the "
-             "currently active session."}}}},
-         {},
-         [](McpServer* server, const json& args) -> json {
-             int sig =
-                 args.contains("signal") ? args["signal"].get<int>() : 15;
-             auto t = server->GetTargetSession(args);
-             if (t->IsExited()) {
-                 throw std::runtime_error("Process already exited.");
-             } else {
-                 t->SendSignal(sig);
-             }
-             return {{"content",
-                      json::array({{{"type", "text"},
-                                    {"text", "Signal " + std::to_string(sig) +
-                                                 " sent."}}})}};
-         }},
-        {"get_status",
-         "Check whether the child subprocess is running or exited.",
-         {{"session_id",
-           {{"type", "string"},
-            {"description",
-             "Optional session ID to target. If omitted, targets the "
-             "currently active session."}}}},
-         {},
-         [](McpServer* server, const json& args) -> json {
-             std::string status_str;
-             auto t = server->GetTargetSession(args);
-             if (t->IsExited()) {
-                 status_str = "exited " + std::to_string(t->ExitStatus());
-             } else {
-                 status_str = "running";
-             }
-             return {{"content", json::array({{{"type", "text"},
-                                               {"text", status_str}}})}};
-         }},
-        {"wait_idle",
-         "Wait until the screen is idle (quiet) for a specific duration or "
-         "until a deadline is reached.",
-         {{"quiet_ms",
-           {{"type", "integer"},
-            {"description",
-             "Minimum duration in milliseconds the terminal must be idle"}}},
-          {"deadline_ms",
-           {{"type", "integer"},
-            {"description", "Maximum milliseconds to wait overall"}}},
-          {"session_id",
-           {{"type", "string"},
-            {"description",
-             "Optional session ID to target. If omitted, targets the "
-             "currently active session."}}}},
-         {"quiet_ms", "deadline_ms"},
-         [](McpServer* server, const json& args) -> json {
-             if (!args.contains("quiet_ms"))
-                 throw std::runtime_error(
-                     "Missing required parameter: quiet_ms");
-             if (!args.contains("deadline_ms"))
-                 throw std::runtime_error(
-                     "Missing required parameter: deadline_ms");
-             int quiet_ms = args.at("quiet_ms").get<int>();
-             int deadline_ms = args.at("deadline_ms").get<int>();
-             if (quiet_ms < 0 || deadline_ms < 0) {
-                 throw std::runtime_error("Times must be non-negative.");
-             }
-             auto t = server->GetTargetSession(args);
-             termobulator::unstable::WaitResult wait_res =
-                 t->WaitIdle(quiet_ms, deadline_ms);
-             std::string result_str;
-             if (wait_res == termobulator::unstable::WaitResult::kIdle) {
-                 result_str = "wait: idle";
-             } else if (wait_res ==
-                        termobulator::unstable::WaitResult::kDeadline) {
-                 result_str = "wait: deadline";
-             } else if (wait_res ==
-                        termobulator::unstable::WaitResult::kExited) {
-                 result_str = "wait: exited";
-             }
-             return {{"content", json::array({{{"type", "text"},
-                                               {"text", result_str}}})}};
-         }},
-        {"wait_for_text",
-         "Wait until a specific string is found on the screen, up to a "
-         "deadline.",
-         {{"text",
-           {{"type", "string"},
-            {"description", "The text query string to wait for"}}},
-          {"deadline_ms",
-           {{"type", "integer"},
-            {"description", "Maximum milliseconds to wait"}}},
-          {"session_id",
-           {{"type", "string"},
-            {"description",
-             "Optional session ID to target. If omitted, targets the "
-             "currently active session."}}}},
-         {"text", "deadline_ms"},
-         [](McpServer* server, const json& args) -> json {
-             if (!args.contains("text"))
-                 throw std::runtime_error("Missing required parameter: text");
-             if (!args.contains("deadline_ms"))
-                 throw std::runtime_error(
-                     "Missing required parameter: deadline_ms");
-             std::string text = args.at("text").get<std::string>();
-             std::string query = Terminal::ParseEscapes(text);
-             int deadline_ms = args.at("deadline_ms").get<int>();
-             if (deadline_ms < 0) {
-                 throw std::runtime_error("Deadline must be non-negative.");
-             }
+const std::vector<McpServer::Tool>&McpServer::GetTools(){
+    static const std::vector<Tool> kTools =
+        {{"create_session",
+          "Spawn a new terminal session running the specified binary.",
+          {{"binary",
+            {{"type", "string"},
+             {"description", "Path to the executable binary to run."}}},
+           {"arguments",
+            {{"type", "array"},
+             {"items", {{"type", "string"}}},
+             {"description", "Optional list of command line arguments."}}},
+           {"session_id",
+            {{"type", "string"},
+             {"description",
+              "Optional unique identifier for the session. If not provided, "
+              "one will be generated."}}},
+           {"width",
+            {{"type", "integer"},
+             {"description",
+              "Optional terminal width (default: width specified at server "
+              "start)."}}},
+           {"height",
+            {{"type", "integer"},
+             {"description",
+              "Optional terminal height (default: height specified at server "
+              "start)."}}},
+           {"terminal",
+            {{"type", "string"},
+             {"description",
+              "Optional terminal type (e.g. \"xterm-256color\", default: "
+              "terminal type specified at server start)."}}},
+           {"locale",
+            {{"type", "string"},
+             {"description",
+              "Optional locale setting (e.g. \"en_US.UTF-8\", default: locale "
+              "specified at server start)."}}},
+           {"disable_alternate_screen",
+            {{"type", "boolean"},
+             {"description",
+              "Optional boolean to disable switching to the terminal's "
+              "alternate "
+              "screen buffer. This helps capture scrollback history for "
+              "curses/TUI "
+              "applications."}}},
+           {"scrollback_size",
+            {{"type", "integer"},
+             {"description",
+              "Optional maximum number of scrollback lines to retain "
+              "(default: "
+              "200)."}}}},
+          {"binary"},
+          [](McpServer* server, const json& args) -> json {
+              if (!args.contains("binary"))
+                  throw std::runtime_error(
+                      "Missing required parameter: binary");
+              std::string binary = args.at("binary").get<std::string>();
+              std::string resolved_bin = server->ResolveBinaryPath(binary);
+              if (!server->IsPathInWorkspace(resolved_bin)) {
+                  throw std::runtime_error("Access denied: target binary '" +
+                                           binary + "' (resolved: '" +
+                                           resolved_bin +
+                                           "') lies outside the workspace.");
+              }
+              std::vector<std::string> cmd_args;
+              if (args.contains("arguments")) {
+                  cmd_args = args["arguments"].get<std::vector<std::string>>();
+              }
+              unsigned int w = args.contains("width")
+                                   ? args["width"].get<unsigned int>()
+                                   : server->width_;
+              unsigned int h = args.contains("height")
+                                   ? args["height"].get<unsigned int>()
+                                   : server->height_;
+              std::string sess_id;
+              unsigned int sb_size =
+                  args.contains("scrollback_size")
+                      ? args["scrollback_size"].get<unsigned int>()
+                      : 200;
+              bool disable_alt =
+                  args.contains("disable_alternate_screen")
+                      ? args["disable_alternate_screen"].get<bool>()
+                      : false;
+              std::string term = args.contains("terminal")
+                                     ? args["terminal"].get<std::string>()
+                                     : server->term_type_;
+              std::string loc = args.contains("locale")
+                                    ? args["locale"].get<std::string>()
+                                    : server->locale_;
+              std::shared_ptr<termobulator::unstable::Terminal> term_obj =
+                  CreateSubprocessTerminal(w, h, binary, cmd_args, term, loc,
+                                           sb_size);
+              term_obj->SetDisableAlternateScreen(disable_alt);
 
-             auto t = server->GetTargetSession(args);
-             auto start_time = std::chrono::steady_clock::now();
-             auto d_dur = std::chrono::milliseconds(deadline_ms);
-             std::string result_str = "wait-for-text: timeout";
-
-             while (true) {
-                 if (app_utils::IsTextOnScreen(t.get(), query)) {
-                     result_str = "wait-for-text: found";
-                     break;
-                 }
-                 if (t->IsExited()) {
-                     result_str = "wait-for-text: exited";
-                     break;
-                 }
-                 auto now = std::chrono::steady_clock::now();
-                 auto elapsed =
-                     std::chrono::duration_cast<std::chrono::milliseconds>(
-                         now - start_time);
-                 if (elapsed >= d_dur) {
-                     result_str = "wait-for-text: timeout";
-                     break;
-                 }
-                 unsigned int remain = deadline_ms - elapsed.count();
-                 unsigned int wait_ms = std::min(10u, remain);
-                 t->WaitIdle(std::min(5u, wait_ms), wait_ms);
-             }
-             return {{"content", json::array({{{"type", "text"},
-                                               {"text", result_str}}})}};
-         }},
-        {"find_text",
-         "Locate all occurrences of a string on the screen. Note: search is "
-         "performed per-row. Text that wraps across multiple rows will not be "
-         "matched.",
-         {{"text",
-           {{"type", "string"},
-            {"description", "The text query string to search for"}}},
-          {"snapshot_id",
-           {{"type", "integer"},
-            {"description", "Optional snapshot ID to query."}}},
-          {"session_id",
-           {{"type", "string"},
-            {"description",
-             "Optional session ID to target. If omitted, targets the "
-             "currently active session."}}}},
-         {"text"},
-         [](McpServer* server, const json& args) -> json {
-             if (!args.contains("text")) {
-                 throw std::runtime_error("Missing required parameter: text");
-             }
-             std::string query_raw = args.at("text").get<std::string>();
-             std::string query = Terminal::ParseEscapes(query_raw);
-             if (query.empty()) {
-                 throw std::runtime_error("Empty search query");
-             }
-             int snap_id = args.contains("snapshot_id")
-                               ? args["snapshot_id"].get<int>()
-                               : -1;
-             ScreenSnapshot snap =
-                 server->GetTargetSession(args)->GetSnapshot(snap_id);
-
-             json results = json::array();
-             for (unsigned int y = 0; y < snap.height; ++y) {
-                 std::string row_str;
-                 std::vector<unsigned int> char_to_cell;
-                 for (unsigned int x = 0; x < snap.width; ++x) {
-                     const std::string& ch = snap.cells[y * snap.width + x].ch;
-                     for (size_t i = 0; i < ch.size(); ++i) {
-                         char_to_cell.push_back(x);
-                     }
-                     row_str += ch;
-                 }
-
-                 size_t pos = row_str.find(query, 0);
-                 while (pos != std::string::npos) {
-                     unsigned int col_start = char_to_cell[pos];
-                     unsigned int col_end =
-                         char_to_cell[pos + query.size() - 1];
-
-                     json item;
-                     item["row"] = y;
-                     item["col_start"] = col_start;
-                     item["col_end"] = col_end;
-                     results.push_back(item);
-
-                     pos = row_str.find(query, pos + 1);
-                 }
-             }
-             return {{"content", json::array({{{"type", "text"},
-                                               {"text", results.dump()}}})}};
-         }},
-        {"take_snapshot",
-         "Capture a snapshot of the current screen state and return a "
-         "snapshot ID.",
-         {{"session_id",
-           {{"type", "string"},
-            {"description",
-             "Optional session ID to target. If omitted, targets the "
-             "currently active session."}}}},
-         {},
-         [](McpServer* server, const json& args) -> json {
-             int id = server->GetTargetSession(args)->Snapshot();
-             json snap_json = {{"snapshot_id", id}};
-             return {{"content", json::array({{{"type", "text"},
-                                               {"text", snap_json.dump()}}})}};
-         }},
-        {"get_diff",
-         "Compare two screen snapshots or compare a snapshot to the current "
-         "screen.",
-         {{"snapshot_id_a",
-           {{"type", "integer"}, {"description", "First snapshot ID"}}},
-          {"snapshot_id_b",
-           {{"type", "integer"},
-            {"description",
-             "Optional second snapshot ID. Use -1 or omit to compare with the "
-             "current screen."}}},
-          {"session_id",
-           {{"type", "string"},
-            {"description",
-             "Optional session ID to target. If omitted, targets the "
-             "currently active session."}}}},
-         {"snapshot_id_a"},
-         [](McpServer* server, const json& args) -> json {
-             if (!args.contains("snapshot_id_a"))
-                 throw std::runtime_error(
-                     "Missing required parameter: snapshot_id_a");
-             int snap_a = args.at("snapshot_id_a").get<int>();
-             int snap_b = args.contains("snapshot_id_b")
-                              ? args["snapshot_id_b"].get<int>()
-                              : -1;
-             auto t = server->GetTargetSession(args);
-             ScreenSnapshot curr = t->GetSnapshot(snap_b);
-             ScreenSnapshot prev = t->GetSnapshot(snap_a);
-
-             if (curr.width != prev.width || curr.height != prev.height) {
-                 throw std::runtime_error(
-                     "Snapshot dimensions mismatch. Snapshots before and "
-                     "after resize are incompatible.");
-             }
-
-             std::string out;
-             for (unsigned int y = 0; y < curr.height; ++y) {
-                 unsigned int cx = 0;
-                 while (cx < curr.width) {
-                     if (curr.cells[y * curr.width + cx].ch !=
-                         prev.cells[y * prev.width + cx].ch) {
-                         unsigned int x_start = cx;
-                         std::string old_str;
-                         std::string new_str;
-                         while (cx < curr.width && cx < prev.width &&
-                                curr.cells[y * curr.width + cx].ch !=
-                                    prev.cells[y * prev.width + cx].ch) {
-                             old_str += prev.cells[y * prev.width + cx].ch;
-                             new_str += curr.cells[y * curr.width + cx].ch;
-                             cx++;
-                         }
-                         out += "row " + std::to_string(y) + " col " +
-                                std::to_string(x_start) + "-" +
-                                std::to_string(cx - 1) + ": \"" + old_str +
-                                "\" -> \"" + new_str + "\"\n";
-                     } else {
-                         cx++;
-                     }
-                 }
-             }
-             return {{"content",
-                      json::array({{{"type", "text"}, {"text", out}}})}};
-         }},
-        {"resize_terminal",
-         "Resize the terminal emulator width and height.",
-         {{"width",
-           {{"type", "integer"},
-            {"description", "New terminal width (columns)"}}},
-          {"height",
-           {{"type", "integer"},
-            {"description", "New terminal height (rows)"}}},
-          {"session_id",
-           {{"type", "string"},
-            {"description",
-             "Optional session ID to target. If omitted, targets the "
-             "currently active session."}}}},
-         {"width", "height"},
-         [](McpServer* server, const json& args) -> json {
-             if (!args.contains("width"))
-                 throw std::runtime_error("Missing required parameter: width");
-             if (!args.contains("height"))
-                 throw std::runtime_error(
-                     "Missing required parameter: height");
-             int w = args.at("width").get<int>();
-             int h = args.at("height").get<int>();
-             if (w <= 0 || h <= 0) {
-                 throw std::runtime_error("Dimensions must be positive.");
-             }
-             server->GetTargetSession(args)->Resize(w, h);
-             return {{"content",
-                      json::array(
-                          {{{"type", "text"},
-                            {"text", "Resized to " + std::to_string(w) + "x" +
-                                         std::to_string(h) + "."}}})}};
-         }},
-        {"create_session",
-         "Spawn a new terminal session running the specified binary.",
-         {{"binary",
-           {{"type", "string"},
-            {"description", "Path to the executable binary to run."}}},
-          {"arguments",
-           {{"type", "array"},
-            {"items", {{"type", "string"}}},
-            {"description", "Optional list of command line arguments."}}},
-          {"session_id",
-           {{"type", "string"},
-            {"description",
-             "Optional unique identifier for the session. If not provided, "
-             "one will be generated."}}},
-          {"width",
-           {{"type", "integer"},
-            {"description",
-             "Optional terminal width (default: width specified at server "
-             "start)."}}},
-          {"height",
-           {{"type", "integer"},
-            {"description",
-             "Optional terminal height (default: height specified at server "
-             "start)."}}},
-          {"terminal",
-           {{"type", "string"},
-            {"description",
-             "Optional terminal type (e.g. \"xterm-256color\", default: "
-             "terminal type specified at server start)."}}},
-          {"locale",
-           {{"type", "string"},
-            {"description",
-             "Optional locale setting (e.g. \"en_US.UTF-8\", default: locale "
-             "specified at server start)."}}},
-          {"disable_alternate_screen",
-           {{"type", "boolean"},
-            {"description",
-             "Optional boolean to disable switching to the terminal's "
-             "alternate "
-             "screen buffer. This helps capture scrollback history for "
-             "curses/TUI "
-             "applications."}}},
-          {"scrollback_size",
-           {{"type", "integer"},
-            {"description",
-             "Optional maximum number of scrollback lines to retain (default: "
-             "200)."}}}},
-         {"binary"},
-         [](McpServer* server, const json& args) -> json {
-             if (!args.contains("binary"))
-                 throw std::runtime_error(
-                     "Missing required parameter: binary");
-             std::string binary = args.at("binary").get<std::string>();
-             std::vector<std::string> cmd_args;
-             if (args.contains("arguments")) {
-                 cmd_args = args["arguments"].get<std::vector<std::string>>();
-             }
-             unsigned int w = args.contains("width")
-                                  ? args["width"].get<unsigned int>()
-                                  : server->width_;
-             unsigned int h = args.contains("height")
-                                  ? args["height"].get<unsigned int>()
-                                  : server->height_;
-             std::string sess_id;
-             unsigned int sb_size =
-                 args.contains("scrollback_size")
-                     ? args["scrollback_size"].get<unsigned int>()
-                     : 200;
-             bool disable_alt =
-                 args.contains("disable_alternate_screen")
-                     ? args["disable_alternate_screen"].get<bool>()
-                     : false;
-             std::string term = args.contains("terminal")
-                                    ? args["terminal"].get<std::string>()
-                                    : server->term_type_;
-             std::string loc = args.contains("locale")
-                                   ? args["locale"].get<std::string>()
-                                   : server->locale_;
-             std::shared_ptr<termobulator::unstable::Terminal> term_obj =
-                 CreateSubprocessTerminal(w, h, binary, cmd_args, term, loc,
-                                          sb_size);
-             term_obj->SetDisableAlternateScreen(disable_alt);
-
-             {
-                 std::lock_guard<std::mutex> lock(server->sessions_mutex_);
-                 if (args.contains("session_id")) {
-                     sess_id = args["session_id"].get<std::string>();
-                     if (server->sessions_.count(sess_id) > 0) {
-                         throw std::runtime_error(
-                             "Session ID already exists: " + sess_id);
-                     }
-                 } else {
-                     sess_id = "session_" +
-                               std::to_string(server->next_session_number_++);
-                     while (server->sessions_.count(sess_id) > 0) {
-                         sess_id =
-                             "session_" +
-                             std::to_string(server->next_session_number_++);
-                     }
-                 }
-                 server->sessions_[sess_id] = std::move(term_obj);
-                 server->sessions_last_activity_[sess_id] =
-                     std::chrono::steady_clock::now();
-                 if (server->first_session_id_.empty()) {
-                     server->first_session_id_ = sess_id;
-                 }
-                 if (server->active_session_id_.empty()) {
-                     server->active_session_id_ = sess_id;
-                 }
-             }
-             json response_json = {{"session_id", sess_id}};
-             return {
-                 {"content", json::array({{{"type", "text"},
-                                           {"text", response_json.dump()}}})}};
-         }},
-        {"close_session",
-         "Terminate and close a terminal session.",
-         {{"session_id",
-           {{"type", "string"},
-            {"description", "The ID of the session to close."}}}},
-         {"session_id"},
-         [](McpServer* server, const json& args) -> json {
-             if (!args.contains("session_id")) {
-                 throw std::runtime_error(
-                     "Missing required parameter: session_id");
-             }
-             std::string sess_id = args.at("session_id").get<std::string>();
-             std::lock_guard<std::mutex> lock(server->sessions_mutex_);
-             if (server->sessions_.count(sess_id) == 0) {
-                 throw std::runtime_error("Session not found: " + sess_id);
-             }
-             server->CloseSessionInternal(sess_id);
-             return {{"content",
-                      json::array(
-                          {{{"type", "text"}, {"text", "Session closed."}}})}};
-         }},
-        {"list_sessions",
-         "List all active terminal sessions and their states.",
-         {},
-         {},
-         [](McpServer* server, const json& args) -> json {
-             std::lock_guard<std::mutex> lock(server->sessions_mutex_);
-             json session_list = json::array();
-             for (const auto& pair : server->sessions_) {
-                 json item;
-                 item["session_id"] = pair.first;
-                 item["status"] =
-                     pair.second->IsExited() ? "exited" : "running";
-                 item["exit_code"] = pair.second->ExitStatus();
-                 item["active"] = (pair.first == server->active_session_id_);
-                 session_list.push_back(item);
-             }
-             return {
-                 {"content", json::array({{{"type", "text"},
-                                           {"text", session_list.dump()}}})}};
-         }},
-        {"set_active_session",
-         "Set the default active session for subsequent tool calls.",
-         {{"session_id",
-           {{"type", "string"},
-            {"description", "The ID of the session to activate."}}}},
-         {"session_id"},
-         [](McpServer* server, const json& args) -> json {
-             if (!args.contains("session_id")) {
-                 throw std::runtime_error(
-                     "Missing required parameter: session_id");
-             }
-             std::string sess_id = args.at("session_id").get<std::string>();
-             std::lock_guard<std::mutex> lock(server->sessions_mutex_);
-             if (server->sessions_.count(sess_id) == 0) {
-                 throw std::runtime_error("Session not found: " + sess_id);
-             }
-             server->active_session_id_ = sess_id;
-             server->sessions_last_activity_[sess_id] =
-                 std::chrono::steady_clock::now();
-             return {{"content",
-                      json::array(
-                          {{{"type", "text"},
-                            {"text", "Active session set to " + sess_id}}})}};
-         }},
-        {"get_scrollback",
-         "Retrieve the scrollback history buffer for a terminal session.",
-         {{"lines",
-           {{"type", "integer"},
-            {"description", "The number of scrollback lines to retrieve."}}},
-          {"format",
-           {{"type", "string"},
-            {"enum", {"text", "lines"}},
-            {"description",
-             "Output format, either 'text' (default) or 'lines'."}}},
-          {"session_id",
-           {{"type", "string"},
-            {"description", "Optional session ID to target."}}}},
-         {"lines"},
-         [](McpServer* server, const json& args) -> json {
-             if (!args.contains("lines")) {
-                 throw std::runtime_error("Missing required parameter: lines");
-             }
-             int lines = args.at("lines").get<int>();
-             if (lines <= 0) {
-                 throw std::runtime_error("Lines must be positive.");
-             }
-             std::string format = "text";
-             if (args.contains("format")) {
-                 format = args.at("format").get<std::string>();
-             }
-             auto term = server->GetTargetSession(args);
-             std::vector<std::string> sb = term->GetScrollback(lines);
-
-             if (format == "lines") {
-                 return {
-                     {"content", json::array({{{"type", "text"},
-                                               {"text", json(sb).dump()}}})}};
-             } else {
-                 std::string text;
-                 for (const auto& line : sb) {
-                     text += line + "\n";
-                 }
-                 return {{"content",
-                          json::array({{{"type", "text"}, {"text", text}}})}};
-             }
-         }},
-        {"get_area",
-         "Retrieve characters and/or attributes from a rectangular area on "
-         "the screen.",
-         {{"x",
-           {{"type", "integer"},
-            {"description",
-             "Column index (0-based) of the top-left corner."}}},
-          {"y",
-           {{"type", "integer"},
-            {"description", "Row index (0-based) of the top-left corner."}}},
-          {"width",
-           {{"type", "integer"},
-            {"description", "Width of the area in characters."}}},
-          {"height",
-           {{"type", "integer"},
-            {"description", "Height of the area in characters."}}},
-          {"format",
-           {{"type", "string"},
-            {"enum", {"text", "lines"}},
-            {"description",
-             "Output format for text, either 'text' (default) or 'lines'."}}},
-          {"include_text",
-           {{"type", "boolean"},
-            {"description",
-             "Include the text content of the area (default: true)."}}},
-          {"include_attrs",
-           {{"type", "boolean"},
-            {"description",
-             "Include the attribute map of the area (default: false)."}}},
-          {"snapshot_id",
-           {{"type", "integer"},
-            {"description",
-             "Optional ID of a snapshot to read from. Use -1 or omit for the "
-             "current active screen."}}},
-          {"session_id",
-           {{"type", "string"},
-            {"description", "Optional session ID to target."}}}},
-         {"x", "y", "width", "height"},
-         [](McpServer* server, const json& args) -> json {
-             if (!args.contains("x") || !args.contains("y") ||
-                 !args.contains("width") || !args.contains("height")) {
-                 throw std::runtime_error(
-                     "Missing required parameters: x, y, width, height");
-             }
-             int x = args.at("x").get<int>();
-             int y = args.at("y").get<int>();
-             int w = args.at("width").get<int>();
-             int h = args.at("height").get<int>();
-             if (w <= 0 || h <= 0) {
-                 throw std::runtime_error(
-                     "Width and height must be positive.");
-             }
-
-             std::string format = "text";
-             if (args.contains("format")) {
-                 format = args.at("format").get<std::string>();
-             }
-             bool include_text = true;
-             if (args.contains("include_text")) {
-                 include_text = args.at("include_text").get<bool>();
-             }
-             bool include_attrs = false;
-             if (args.contains("include_attrs")) {
-                 include_attrs = args.at("include_attrs").get<bool>();
-             }
-             int snap_id = args.contains("snapshot_id")
-                               ? args.at("snapshot_id").get<int>()
-                               : -1;
-
-             ScreenSnapshot snap =
-                 server->GetTargetSession(args)->GetSnapshot(snap_id);
-
-             bool clipped = false;
-             if (x < 0 || y < 0 || x + w > static_cast<int>(snap.width) ||
-                 y + h > static_cast<int>(snap.height)) {
-                 clipped = true;
-             }
-
-             int x1 = std::max(0, x);
-             int y1 = std::max(0, y);
-             int x2 = std::min(static_cast<int>(snap.width) - 1, x + w - 1);
-             int y2 = std::min(static_cast<int>(snap.height) - 1, y + h - 1);
-
-             json response_obj = json::object();
-
-             if (include_text) {
-                 if (x1 > x2 || y1 > y2) {
-                     if (format == "lines") {
-                         response_obj["text"] = json::array();
-                     } else {
-                         response_obj["text"] = "";
-                     }
-                 } else {
-                     if (format == "lines") {
-                         json lines_arr = json::array();
-                         for (int row = y1; row <= y2; ++row) {
-                             std::string row_str;
-                             for (int col = x1; col <= x2; ++col) {
-                                 row_str +=
-                                     snap.cells[row * snap.width + col].ch;
-                             }
-                             lines_arr.push_back(row_str);
-                         }
-                         response_obj["text"] = lines_arr;
-                     } else {
-                         std::string text_str;
-                         for (int row = y1; row <= y2; ++row) {
-                             if (row > y1) text_str += "\n";
-                             for (int col = x1; col <= x2; ++col) {
-                                 text_str +=
-                                     snap.cells[row * snap.width + col].ch;
-                             }
-                         }
-                         response_obj["text"] = text_str;
-                     }
-                 }
-             }
-
-             if (include_attrs) {
-                 json attrs_arr = json::array();
-                 if (!(x1 > x2 || y1 > y2)) {
-                     for (int row = y1; row <= y2; ++row) {
-                         json row_attrs = json::array();
-                         for (int col = x1; col <= x2; ++col) {
-                             row_attrs.push_back(app_utils::FormatAttr(
-                                 snap.cells[row * snap.width + col].attr));
-                         }
-                         attrs_arr.push_back(row_attrs);
-                     }
-                 }
-                 response_obj["attributes"] = attrs_arr;
-             }
-
-             if (clipped) {
-                 response_obj["warning"] =
-                     "Requested area was clipped by the actual screen "
-                     "dimensions (" +
-                     std::to_string(snap.width) + "x" +
-                     std::to_string(snap.height) + ").";
-             }
-
-             return {
-                 {"content", json::array({{{"type", "text"},
-                                           {"text", response_obj.dump()}}})}};
-         }}};
-    return kTools;
+              {
+                  std::lock_guard<std::mutex> lock(server->sessions_mutex_);
+                  if (args.contains("session_id")) {
+                      sess_id = args["session_id"].get<std::string>();
+                      if (server->sessions_.count(sess_id) > 0) {
+                          throw std::runtime_error(
+                              "Session ID already exists: " + sess_id);
+                      }
+                  } else {
+                      sess_id = "session_" +
+                                std::to_string(server->next_session_number_++);
+                      while (server->sessions_.count(sess_id) > 0) {
+                          sess_id =
+                              "session_" +
+                              std::to_string(server->next_session_number_++);
+                      }
+                  }
+                  server->sessions_[sess_id] = std::move(term_obj);
+                  server->sessions_last_activity_[sess_id] =
+                      std::chrono::steady_clock::now();
+                  if (server->first_session_id_.empty()) {
+                      server->first_session_id_ = sess_id;
+                  }
+                  if (server->active_session_id_.empty()) {
+                      server->active_session_id_ = sess_id;
+                  }
+              }
+              json response_json = {{"session_id", sess_id}};
+              return {{"content",
+                       json::array({{{"type", "text"},
+                                     {"text", response_json.dump()}}})}};
+          }},
+         {"close_session",
+          "Terminate and close a terminal session.",
+          {{"session_id",
+            {{"type", "string"},
+             {"description", "The ID of the session to close."}}}},
+          {"session_id"},
+          [](McpServer* server, const json& args) -> json {
+              if (!args.contains("session_id")) {
+                  throw std::runtime_error(
+                      "Missing required parameter: session_id");
+              }
+              std::string sess_id = args.at("session_id").get<std::string>();
+              std::lock_guard<std::mutex> lock(server->sessions_mutex_);
+              if (server->sessions_.count(sess_id) == 0) {
+                  throw std::runtime_error("Session not found: " + sess_id);
+              }
+              server->CloseSessionInternal(sess_id);
+              return {
+                  {"content", json::array({{{"type", "text"},
+                                            {"text", "Session closed."}}})}};
+          }},
+         {"list_sessions",
+          "List all active terminal sessions and their states.",
+          {},
+          {},
+          [](McpServer* server, const json& args) -> json {
+              std::lock_guard<std::mutex> lock(server->sessions_mutex_);
+              json session_list = json::array();
+              for (const auto& pair : server->sessions_) {
+                  json item;
+                  item["session_id"] = pair.first;
+                  item["status"] =
+                      pair.second->IsExited() ? "exited" : "running";
+                  item["exit_code"] = pair.second->ExitStatus();
+                  item["active"] = (pair.first == server->active_session_id_);
+                  session_list.push_back(item);
+              }
+              return {
+                  {"content", json::array({{{"type", "text"},
+                                            {"text", session_list.dump()}}})}};
+          }},
+         {"set_active_session",
+          "Set the default active session for subsequent tool calls.",
+          {{"session_id",
+            {{"type", "string"},
+             {"description", "The ID of the session to activate."}}}},
+          {"session_id"},
+          [](McpServer* server, const json& args) -> json {
+              if (!args.contains("session_id")) {
+                  throw std::runtime_error(
+                      "Missing required parameter: session_id");
+              }
+              std::string sess_id = args.at("session_id").get<std::string>();
+              std::lock_guard<std::mutex> lock(server->sessions_mutex_);
+              if (server->sessions_.count(sess_id) == 0) {
+                  throw std::runtime_error("Session not found: " + sess_id);
+              }
+              server->active_session_id_ = sess_id;
+              server->sessions_last_activity_[sess_id] =
+                  std::chrono::steady_clock::now();
+              return {{"content",
+                       json::array(
+                           {{{"type", "text"},
+                             {"text", "Active session set to " + sess_id}}})}};
+          }},
+         {"execute_dsl",
+          "Execute a series of DSL instructions on the session's persistent "
+          "stack machine to interact with or inspect the terminal. See "
+          "initialize "
+          "instructions for the full language syntax and operators list.",
+          {{"instructions",
+            {{"type", "array"},
+             {"items", json::object()},
+             {"description",
+              "A JSON array of DSL instructions and/or literals, or a "
+              "space-separated string of instructions."}}},
+           {"session_id",
+            {{"type", "string"},
+             {"description",
+              "Optional session ID to target. If omitted, targets the "
+              "currently active session."}}}},
+          {"instructions"},
+          [](McpServer* server, const json& args) -> json {
+              auto interp = server->GetInterpreter(args);
+              json instrs = args.at("instructions");
+              json final_stack;
+              if (instrs.is_string()) {
+                  final_stack = interp->ExecuteText(instrs.get<std::string>());
+              } else if (instrs.is_array()) {
+                  final_stack = interp->Execute(instrs);
+              } else {
+                  throw std::runtime_error(
+                      "instructions must be either a JSON array or a string");
+              }
+              return {{"content",
+                       json::array({{{"type", "text"},
+                                     {"text", final_stack.dump()}}})}};
+          }}};
+return kTools;
 }
 
 void McpServer::HandleToolsList(const json& id, const json& req) {
@@ -1300,6 +670,132 @@ json McpServer::ExecuteTool(const std::string& name, const json& args) {
         }
     }
     throw std::runtime_error("Unknown tool: " + name);
+}
+
+void McpServer::ParseRoots(const json& roots_json) {
+    std::lock_guard<std::mutex> lock(sessions_mutex_);
+    workspace_roots_.clear();
+    if (!roots_json.is_array()) return;
+    for (const auto& item : roots_json) {
+        if (item.contains("uri")) {
+            std::string uri = item["uri"].get<std::string>();
+            if (uri.rfind("file://", 0) == 0) {
+                std::string path = uri.substr(7);
+                std::string decoded;
+                for (size_t i = 0; i < path.size(); ++i) {
+                    if (path[i] == '%' && i + 2 < path.size()) {
+                        int value = 0;
+                        std::stringstream ss;
+                        ss << std::hex << path.substr(i + 1, 2);
+                        ss >> value;
+                        decoded.push_back(static_cast<char>(value));
+                        i += 2;
+                    } else {
+                        decoded.push_back(path[i]);
+                    }
+                }
+                char actual_path[PATH_MAX];
+                if (realpath(decoded.c_str(), actual_path) != nullptr) {
+                    workspace_roots_.push_back(actual_path);
+                } else {
+                    workspace_roots_.push_back(decoded);
+                }
+            }
+        }
+    }
+}
+
+void McpServer::RequestRoots() {
+    json req;
+    req["jsonrpc"] = "2.0";
+    req["method"] = "roots/list";
+    req["id"] = "get_roots";
+    SendJson(req);
+}
+
+void McpServer::HandleRootsListChanged(const json& req) {
+    if (initialized_ && client_supports_roots_) {
+        RequestRoots();
+    }
+}
+
+bool McpServer::IsPathInWorkspace(const std::string& binary_path) {
+    std::vector<std::string> allowed_roots;
+    {
+        std::lock_guard<std::mutex> lock(sessions_mutex_);
+        if (!client_supports_roots_) {
+            return true;
+        }
+        allowed_roots = workspace_roots_;
+    }
+
+    if (allowed_roots.empty()) {
+        char cwd[PATH_MAX];
+        if (getcwd(cwd, sizeof(cwd)) != nullptr) {
+            allowed_roots.push_back(cwd);
+        }
+    }
+    for (const auto& root : allowed_roots) {
+        std::string clean_root = root;
+        if (!clean_root.empty() && clean_root.back() != '/') {
+            clean_root += '/';
+        }
+        if (binary_path == root) {
+            return true;
+        }
+        if (binary_path.rfind(clean_root, 0) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string McpServer::ResolveBinaryPath(const std::string& binary) {
+    if (binary.empty()) return "";
+
+    if (binary[0] == '/') {
+        char abs_path[PATH_MAX];
+        if (realpath(binary.c_str(), abs_path) != nullptr) {
+            return abs_path;
+        }
+        return binary;
+    }
+
+    if (binary.find('/') != std::string::npos) {
+        char abs_path[PATH_MAX];
+        if (realpath(binary.c_str(), abs_path) != nullptr) {
+            return abs_path;
+        }
+        return binary;
+    }
+
+    char abs_path[PATH_MAX];
+    if (realpath(binary.c_str(), abs_path) != nullptr) {
+        if (access(abs_path, X_OK) == 0) {
+            return abs_path;
+        }
+    }
+
+    const char* path_env = std::getenv("PATH");
+    if (path_env != nullptr) {
+        std::string path_str(path_env);
+        std::string segment;
+        std::stringstream ss(path_str);
+        while (std::getline(ss, segment, ':')) {
+            if (segment.empty()) segment = ".";
+            std::string full_path = segment + "/" + binary;
+            if (realpath(full_path.c_str(), abs_path) != nullptr) {
+                if (access(abs_path, X_OK) == 0) {
+                    return abs_path;
+                }
+            }
+        }
+    }
+
+    if (realpath(binary.c_str(), abs_path) != nullptr) {
+        return abs_path;
+    }
+    return binary;
 }
 
 }  // namespace termobulator
