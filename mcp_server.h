@@ -25,7 +25,7 @@ namespace termobulator {
 class McpServer {
   public:
     McpServer(unsigned int width, unsigned int height,
-              const std::string& term_type = "tmux-256color",
+              const std::string& term_type = "xterm-256color",
               const std::string& locale = "",
               unsigned int idle_timeout_sec = 300, bool do_log = false);
 
@@ -49,6 +49,8 @@ class McpServer {
     void HandleInitialized(const json& req);
     void HandleToolsList(const json& id, const json& req);
     void HandleToolsCall(const json& id, const json& req);
+    void HandleResourcesList(const json& id, const json& req);
+    void HandleResourcesRead(const json& id, const json& req);
     json ExecuteTool(const std::string& name, const json& args);
     void SendJson(const json& resp);
     void WriteLog(std::string_view direction, const std::string& message);

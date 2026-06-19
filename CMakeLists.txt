@@ -23,8 +23,44 @@ set_target_properties(libtermobulator PROPERTIES
 )
 target_link_libraries(libtermobulator PRIVATE tsm Threads::Threads)
 
-add_executable(termobulator main.cc app_utils.cc app_utils.h interactive_cli.cc interactive_cli.h mcp_server.cc mcp_server.h dsl_interpreter.cc dsl_interpreter.h)
+add_executable(termobulator main.cc app_utils.cc app_utils.h interactive_cli.cc interactive_cli.h mcp_server.cc mcp_server.h dsl_interpreter.cc dsl_interpreter.h terminal_levels.h)
 target_link_libraries(termobulator PRIVATE libtermobulator Threads::Threads nlohmann_json::nlohmann_json)
+
+# Bundled terminfo entries
+include(GNUInstallDirs)
+find_program(TIC tic)
+if(TIC)
+    set(TERMINFO_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/terminfo/termobulator.ti)
+    set(TERMINFO_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/terminfo)
+    add_custom_command(
+        OUTPUT ${TERMINFO_OUTPUT_DIR}/.stamp
+        COMMAND ${TIC} -o ${TERMINFO_OUTPUT_DIR} ${TERMINFO_SOURCE}
+        COMMAND ${CMAKE_COMMAND} -E touch ${TERMINFO_OUTPUT_DIR}/.stamp
+        DEPENDS ${TERMINFO_SOURCE}
+        COMMENT "Compiling bundled terminfo entries"
+    )
+    add_custom_target(terminfo_compiled ALL DEPENDS ${TERMINFO_OUTPUT_DIR}/.stamp)
+    add_dependencies(termobulator terminfo_compiled)
+    install(DIRECTORY ${TERMINFO_OUTPUT_DIR}/
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/termobulator/terminfo
+        PATTERN ".stamp" EXCLUDE
+    )
+    set(TERMINFO_INSTALL_DIR "${CMAKE_INSTALL_FULL_DATADIR}/termobulator/terminfo")
+    set(TERMINFO_BUILD_DIR "${TERMINFO_OUTPUT_DIR}")
+else()
+    message(WARNING "tic not found: bundled terminfo will not be compiled. Synthetic terminal types and color-suffix symbolic names will be unavailable unless the system terminfo database provides them.")
+    set(TERMINFO_INSTALL_DIR "")
+    set(TERMINFO_BUILD_DIR "")
+endif()
+
+target_compile_definitions(termobulator PRIVATE
+    TERMOBULATOR_TERMINFO_DIR="${TERMINFO_INSTALL_DIR}"
+    TERMOBULATOR_BUILD_TERMINFO_DIR="${TERMINFO_BUILD_DIR}"
+)
+target_compile_definitions(libtermobulator PRIVATE
+    TERMOBULATOR_TERMINFO_DIR="${TERMINFO_INSTALL_DIR}"
+    TERMOBULATOR_BUILD_TERMINFO_DIR="${TERMINFO_BUILD_DIR}"
+)
 
 # Testing Support
 enable_testing()
@@ -41,7 +77,6 @@ add_test(NAME integration_test COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests
 add_test(NAME mcp_integration_test COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mcp.py)
 
 # Installation Rules
-include(GNUInstallDirs)
 
 install(TARGETS termobulator libtermobulator
     EXPORT termobulatorTargets

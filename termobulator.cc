@@ -7,6 +7,7 @@
 #include <libtsm.h>
 #include <signal.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -15,6 +16,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <climits>
 #include <condition_variable>
 #include <fstream>
 #include <iostream>
@@ -687,6 +689,55 @@ SubprocessTerminalImpl::SubprocessTerminalImpl(
 
         setenv("TERM", term_type.c_str(), 1);
         unsetenv("TERMCAP");
+
+        // Set TERMINFO_DIRS so the bundled terminfo entries are found.
+        // Resolution order: installed path → binary-relative path → build-tree
+        // path. /usr/share/terminfo is always appended as a system fallback.
+        auto get_bundled_terminfo_dir = []() -> std::string {
+            // 1. Compiled-in install path (set at build time).
+            const char *install_dir = TERMOBULATOR_TERMINFO_DIR;
+            if (install_dir && install_dir[0] != '\0') {
+                struct stat st;
+                if (stat(install_dir, &st) == 0 && S_ISDIR(st.st_mode)) {
+                    return install_dir;
+                }
+            }
+            // 2. Binary-relative: /proc/self/exe ->
+            // ../share/termobulator/terminfo
+            char exe_path[PATH_MAX];
+            ssize_t len =
+                readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+            if (len > 0) {
+                exe_path[len] = '\0';
+                std::string dir(exe_path);
+                auto slash = dir.rfind('/');
+                if (slash != std::string::npos) {
+                    std::string candidate = dir.substr(0, slash) +
+                                            "/../share/termobulator/terminfo";
+                    char resolved[PATH_MAX];
+                    if (realpath(candidate.c_str(), resolved) != nullptr) {
+                        struct stat st;
+                        if (stat(resolved, &st) == 0 && S_ISDIR(st.st_mode)) {
+                            return resolved;
+                        }
+                    }
+                }
+            }
+            // 3. Build-tree path (for development runs).
+            const char *build_dir = TERMOBULATOR_BUILD_TERMINFO_DIR;
+            if (build_dir && build_dir[0] != '\0') {
+                struct stat st;
+                if (stat(build_dir, &st) == 0 && S_ISDIR(st.st_mode)) {
+                    return build_dir;
+                }
+            }
+            return "";
+        };
+        std::string bundled = get_bundled_terminfo_dir();
+        std::string terminfo_dirs =
+            (bundled.empty() ? "" : bundled + ":") + "/usr/share/terminfo";
+        setenv("TERMINFO_DIRS", terminfo_dirs.c_str(), 1);
+
         if (!locale.empty()) {
             setenv("LC_ALL", locale.c_str(), 1);
             setenv("LANG", locale.c_str(), 1);

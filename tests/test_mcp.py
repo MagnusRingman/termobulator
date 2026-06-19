@@ -1207,8 +1207,185 @@ def run_workspace_limits_test():
         print("MCP empty roots test failed:", e)
         sys.exit(1)
 
+def run_terminal_levels_test():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(script_dir)
+
+    if os.path.exists("./termobulator"):
+        binary_path = "./termobulator"
+    elif os.path.exists(os.path.join(project_root, "build", "termobulator")):
+        binary_path = os.path.join(project_root, "build", "termobulator")
+    else:
+        binary_path = "./build/termobulator"
+
+    print("Running terminal levels test...")
+    proc = subprocess.Popen(
+        [binary_path, "--mcp"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True
+    )
+
+    def send_msg(msg):
+        line = json.dumps(msg)
+        proc.stdin.write(line + "\n")
+        proc.stdin.flush()
+
+    def read_msg():
+        line = proc.stdout.readline()
+        if not line:
+            return None
+        return json.loads(line)
+
+    def handshake():
+        send_msg({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                  "params": {"protocolVersion": "2024-11-05",
+                             "capabilities": {},
+                             "clientInfo": {"name": "TestClient", "version": "1.0"}}})
+        read_msg()
+        send_msg({"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+    def create_and_check_term(msg_id, terminal_arg, expected_terminfo):
+        """Create a session with the given terminal arg, verify response field and TERM env."""
+        args = {"binary": "/bin/sh",
+                "arguments": ["-c", "echo TERM=$TERM"],
+                "session_id": f"sess_{msg_id}"}
+        if terminal_arg is not None:
+            args["terminal"] = terminal_arg
+        send_msg({"jsonrpc": "2.0", "id": msg_id, "method": "tools/call",
+                  "params": {"name": "create_session", "arguments": args}})
+        resp = read_msg()
+        assert resp is not None
+        assert not resp["result"].get("isError", False), \
+            f"create_session failed: {resp}"
+        create_data = json.loads(resp["result"]["content"][0]["text"])
+        assert create_data["terminal"] == expected_terminfo, \
+            f"Expected terminal={expected_terminfo!r}, got {create_data['terminal']!r}"
+
+        # Read TERM from the child's environment
+        send_msg({"jsonrpc": "2.0", "id": msg_id + 1000, "method": "tools/call",
+                  "params": {"name": "execute_dsl",
+                             "arguments": {"session_id": f"sess_{msg_id}",
+                                           "instructions": "20 500 wait_idle clear -1 get_screen"}}})
+        resp2 = read_msg()
+        assert resp2 is not None
+        screen = json.loads(resp2["result"]["content"][0]["text"])[0]
+        assert f"TERM={expected_terminfo}" in screen, \
+            f"Expected TERM={expected_terminfo} in screen, got: {screen!r}"
+
+        # Clean up
+        send_msg({"jsonrpc": "2.0", "id": msg_id + 2000, "method": "tools/call",
+                  "params": {"name": "close_session",
+                             "arguments": {"session_id": f"sess_{msg_id}"}}})
+        read_msg()
+        return create_data
+
+    try:
+        handshake()
+
+        # 1. Symbolic name resolution: "basic" -> vt100
+        create_and_check_term(10, "basic", "vt100")
+        print("  [1] Symbolic name resolution: OK")
+
+        # 2. Compound name: "extended-8color" -> termobulator-extended-8color
+        create_and_check_term(20, "extended-8color",
+                              "termobulator-extended-8color")
+        print("  [2] Compound name: OK")
+
+
+        # 3. Case insensitivity: "FULL-MONO" -> termobulator-full-mono
+        create_and_check_term(30, "FULL-MONO", "termobulator-full-mono")
+        print("  [3] Case insensitivity: OK")
+
+        # 4. Alias: "extended-mono" -> vt220 (no warning)
+        data = create_and_check_term(40, "extended-mono", "vt220")
+        assert "warning" not in data, \
+            f"Expected no warning for extended-mono, got: {data.get('warning')}"
+        print("  [4] extended-mono alias (no warning): OK")
+
+        # 5. Unknown warning: "my-custom-term" -> passthrough + warning
+        send_msg({"jsonrpc": "2.0", "id": 50, "method": "tools/call",
+                  "params": {"name": "create_session",
+                             "arguments": {"binary": "/bin/sh",
+                                           "arguments": ["-c", "echo hi"],
+                                           "session_id": "sess_unknown",
+                                           "terminal": "my-custom-term"}}})
+        resp = read_msg()
+        assert not resp["result"].get("isError", False)
+        data = json.loads(resp["result"]["content"][0]["text"])
+        assert data["terminal"] == "my-custom-term"
+        assert "warning" in data, "Expected warning for unknown terminal type"
+        assert "my-custom-term" in data["warning"]
+        send_msg({"jsonrpc": "2.0", "id": 51, "method": "tools/call",
+                  "params": {"name": "close_session",
+                             "arguments": {"session_id": "sess_unknown"}}})
+        read_msg()
+        print("  [5] Unknown terminal warning: OK")
+
+        # 6. resources/list
+        send_msg({"jsonrpc": "2.0", "id": 60, "method": "resources/list",
+                  "params": {}})
+        resp = read_msg()
+        assert resp is not None
+        assert "result" in resp, f"resources/list error: {resp}"
+        resources = resp["result"]["resources"]
+        uris = [r["uri"] for r in resources]
+        assert "termobulator://docs/terminal-levels" in uris, \
+            f"Expected terminal-levels resource, got: {uris}"
+        print("  [6] resources/list: OK")
+
+        # 7. resources/read
+        send_msg({"jsonrpc": "2.0", "id": 70, "method": "resources/read",
+                  "params": {"uri": "termobulator://docs/terminal-levels"}})
+        resp = read_msg()
+        assert resp is not None
+        assert "result" in resp, f"resources/read error: {resp}"
+        contents = resp["result"]["contents"]
+        assert len(contents) > 0
+        text = contents[0]["text"]
+        for level in ["minimal", "basic", "extended", "full"]:
+            assert level in text, f"Expected level {level!r} in docs text"
+        print("  [7] resources/read: OK")
+
+        # 8. Default changed: no terminal param -> xterm-256color
+        send_msg({"jsonrpc": "2.0", "id": 80, "method": "tools/call",
+                  "params": {"name": "create_session",
+                             "arguments": {"binary": "/bin/sh",
+                                           "arguments": ["-c", "echo TERM=$TERM"],
+                                           "session_id": "sess_default"}}})
+        resp = read_msg()
+        assert not resp["result"].get("isError", False)
+        data = json.loads(resp["result"]["content"][0]["text"])
+        assert data["terminal"] == "xterm-256color", \
+            f"Expected default terminal=xterm-256color, got {data['terminal']!r}"
+        send_msg({"jsonrpc": "2.0", "id": 81, "method": "tools/call",
+                  "params": {"name": "execute_dsl",
+                             "arguments": {"session_id": "sess_default",
+                                           "instructions": "20 500 wait_idle clear -1 get_screen"}}})
+        resp = read_msg()
+        screen = json.loads(resp["result"]["content"][0]["text"])[0]
+        assert "TERM=xterm-256color" in screen, \
+            f"Expected TERM=xterm-256color, got: {screen!r}"
+        send_msg({"jsonrpc": "2.0", "id": 82, "method": "tools/call",
+                  "params": {"name": "close_session",
+                             "arguments": {"session_id": "sess_default"}}})
+        read_msg()
+        print("  [8] Default changed to xterm-256color: OK")
+
+        proc.stdin.close()
+        proc.wait(timeout=2.0)
+        print("Terminal levels test passed successfully!")
+
+    except Exception as e:
+        proc.kill()
+        traceback.print_exc()
+        print("Terminal levels test failed:", e)
+        sys.exit(1)
+
 if __name__ == "__main__":
     run_mcp_test()
     run_idle_timeout_test()
     run_logging_test()
     run_workspace_limits_test()
+    run_terminal_levels_test()

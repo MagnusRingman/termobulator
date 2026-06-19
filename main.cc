@@ -30,7 +30,7 @@ int main(int argc, char* argv[]) {
 
     unsigned int width = 80;
     unsigned int height = 24;
-    std::string term_type = "tmux-256color";
+    std::string term_type = "xterm-256color";
     std::string locale = "";
     unsigned int idle_timeout_sec = 300;
     bool mcp_mode = false;

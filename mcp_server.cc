@@ -13,14 +13,12 @@
 #include <stdexcept>
 #include <utility>
 
-#include "app_utils.h"
+#include "terminal_levels.h"
 
 namespace termobulator {
 
 using json = nlohmann::json;
-using termobulator::unstable::CellAttr;
 using termobulator::unstable::CreateSubprocessTerminal;
-using termobulator::unstable::ScreenSnapshot;
 using termobulator::unstable::Terminal;
 
 McpServer::McpServer(unsigned int width, unsigned int height,
@@ -180,6 +178,10 @@ void McpServer::ProcessMcpMessage(const json& msg) {
         HandleToolsList(id, msg);
     } else if (method == "tools/call") {
         HandleToolsCall(id, msg);
+    } else if (method == "resources/list") {
+        HandleResourcesList(id, msg);
+    } else if (method == "resources/read") {
+        HandleResourcesRead(id, msg);
     } else {
         if (has_id) {
             SendJsonRpcError(id, -32601, "Method not found: " + method);
@@ -203,6 +205,7 @@ void McpServer::HandleInitialize(const json& id, const json& req) {
     resp["id"] = id;
     resp["result"]["protocolVersion"] = "2024-11-05";
     resp["result"]["capabilities"]["tools"] = json::object();
+    resp["result"]["capabilities"]["resources"] = json::object();
     resp["result"]["serverInfo"]["name"] = "termobulator";
     resp["result"]["serverInfo"]["version"] = "1.1.0";
     resp["result"]["instructions"] =
@@ -291,7 +294,17 @@ void McpServer::HandleInitialize(const json& id, const json& req) {
         "query, push array of `{\"row\": y, \"col_start\": x, \"col_end\": "
         "x}`.\n"
         "- `get_diff` `( snapshot_id_b snapshot_id_a -- diff_str )`: Diff "
-        "snapshots, older first. Pushes text summary of difference.";
+        "snapshots, older first. Pushes text summary of difference.\n\n"
+        "### Terminal Capability Levels\n"
+        "The `terminal` parameter on `create_session` controls what terminal "
+        "capabilities the launched application sees. The default is "
+        "`\"full\"` "
+        "(xterm-256color). Use lower levels like `\"basic\"` (vt100) or "
+        "`\"extended\"` (vt220) to test degraded-terminal behaviour. Color "
+        "depth can be controlled independently by appending a suffix: "
+        "`\"full-8color\"`, `\"basic-16color\"`, etc. Read the "
+        "`termobulator://docs/terminal-levels` resource for the full "
+        "reference.";
     SendJson(resp);
 }
 
@@ -384,230 +397,247 @@ void McpServer::CloseSessionInternal(const std::string& sess_id) {
     }
 }
 
-const std::vector<McpServer::Tool>&McpServer::GetTools(){
-    static const std::vector<Tool> kTools =
-        {{"create_session",
-          "Spawn a new terminal session running the specified binary.",
-          {{"binary",
-            {{"type", "string"},
-             {"description", "Path to the executable binary to run."}}},
-           {"arguments",
-            {{"type", "array"},
-             {"items", {{"type", "string"}}},
-             {"description", "Optional list of command line arguments."}}},
-           {"session_id",
-            {{"type", "string"},
-             {"description",
-              "Optional unique identifier for the session. If not provided, "
-              "one will be generated."}}},
-           {"width",
-            {{"type", "integer"},
-             {"description",
-              "Optional terminal width (default: width specified at server "
-              "start)."}}},
-           {"height",
-            {{"type", "integer"},
-             {"description",
-              "Optional terminal height (default: height specified at server "
-              "start)."}}},
-           {"terminal",
-            {{"type", "string"},
-             {"description",
-              "Optional terminal type (e.g. \"xterm-256color\", default: "
-              "terminal type specified at server start)."}}},
-           {"locale",
-            {{"type", "string"},
-             {"description",
-              "Optional locale setting (e.g. \"en_US.UTF-8\", default: locale "
-              "specified at server start)."}}},
-           {"disable_alternate_screen",
-            {{"type", "boolean"},
-             {"description",
-              "Optional boolean to disable switching to the terminal's "
-              "alternate "
-              "screen buffer. This helps capture scrollback history for "
-              "curses/TUI "
-              "applications."}}},
-           {"scrollback_size",
-            {{"type", "integer"},
-             {"description",
-              "Optional maximum number of scrollback lines to retain "
-              "(default: "
-              "200)."}}}},
-          {"binary"},
-          [](McpServer* server, const json& args) -> json {
-              if (!args.contains("binary"))
-                  throw std::runtime_error(
-                      "Missing required parameter: binary");
-              std::string binary = args.at("binary").get<std::string>();
-              std::string resolved_bin = server->ResolveBinaryPath(binary);
-              if (!server->IsPathInWorkspace(resolved_bin)) {
-                  throw std::runtime_error("Access denied: target binary '" +
-                                           binary + "' (resolved: '" +
-                                           resolved_bin +
-                                           "') lies outside the workspace.");
-              }
-              std::vector<std::string> cmd_args;
-              if (args.contains("arguments")) {
-                  cmd_args = args["arguments"].get<std::vector<std::string>>();
-              }
-              unsigned int w = args.contains("width")
-                                   ? args["width"].get<unsigned int>()
-                                   : server->width_;
-              unsigned int h = args.contains("height")
-                                   ? args["height"].get<unsigned int>()
-                                   : server->height_;
-              std::string sess_id;
-              unsigned int sb_size =
-                  args.contains("scrollback_size")
-                      ? args["scrollback_size"].get<unsigned int>()
-                      : 200;
-              bool disable_alt =
-                  args.contains("disable_alternate_screen")
-                      ? args["disable_alternate_screen"].get<bool>()
-                      : false;
-              std::string term = args.contains("terminal")
-                                     ? args["terminal"].get<std::string>()
-                                     : server->term_type_;
-              std::string loc = args.contains("locale")
-                                    ? args["locale"].get<std::string>()
-                                    : server->locale_;
-              std::shared_ptr<termobulator::unstable::Terminal> term_obj =
-                  CreateSubprocessTerminal(w, h, binary, cmd_args, term, loc,
-                                           sb_size);
-              term_obj->SetDisableAlternateScreen(disable_alt);
+const std::vector<McpServer::Tool>& McpServer::GetTools() {
+    static const std::vector<Tool> kTools = {
+        {"create_session",
+         "Spawn a new terminal session running the specified binary.",
+         {{"binary",
+           {{"type", "string"},
+            {"description", "Path to the executable binary to run."}}},
+          {"arguments",
+           {{"type", "array"},
+            {"items", {{"type", "string"}}},
+            {"description", "Optional list of command line arguments."}}},
+          {"session_id",
+           {{"type", "string"},
+            {"description",
+             "Optional unique identifier for the session. If not provided, "
+             "one will be generated."}}},
+          {"width",
+           {{"type", "integer"},
+            {"description",
+             "Optional terminal width (default: width specified at server "
+             "start)."}}},
+          {"height",
+           {{"type", "integer"},
+            {"description",
+             "Optional terminal height (default: height specified at server "
+             "start)."}}},
+          {"terminal",
+           {{"type", "string"},
+            {"description",
+             "Optional terminal type. Accepts symbolic level names "
+             "(\"minimal\", \"basic\", \"extended\", \"full\") with optional "
+             "color suffix (e.g. \"basic-8color\", \"full-16color\"), or any "
+             "raw terminfo name. Default: terminal type specified at server "
+             "start (\"full\" = xterm-256color)."}}},
+          {"locale",
+           {{"type", "string"},
+            {"description",
+             "Optional locale setting (e.g. \"en_US.UTF-8\", default: locale "
+             "specified at server start)."}}},
+          {"disable_alternate_screen",
+           {{"type", "boolean"},
+            {"description",
+             "Optional boolean to disable switching to the terminal's "
+             "alternate "
+             "screen buffer. This helps capture scrollback history for "
+             "curses/TUI "
+             "applications."}}},
+          {"scrollback_size",
+           {{"type", "integer"},
+            {"description",
+             "Optional maximum number of scrollback lines to retain "
+             "(default: "
+             "200)."}}}},
+         {"binary"},
+         [](McpServer* server, const json& args) -> json {
+             if (!args.contains("binary"))
+                 throw std::runtime_error(
+                     "Missing required parameter: binary");
+             std::string binary = args.at("binary").get<std::string>();
+             std::string resolved_bin = server->ResolveBinaryPath(binary);
+             if (!server->IsPathInWorkspace(resolved_bin)) {
+                 throw std::runtime_error("Access denied: target binary '" +
+                                          binary + "' (resolved: '" +
+                                          resolved_bin +
+                                          "') lies outside the workspace.");
+             }
+             std::vector<std::string> cmd_args;
+             if (args.contains("arguments")) {
+                 cmd_args = args["arguments"].get<std::vector<std::string>>();
+             }
+             unsigned int w = args.contains("width")
+                                  ? args["width"].get<unsigned int>()
+                                  : server->width_;
+             unsigned int h = args.contains("height")
+                                  ? args["height"].get<unsigned int>()
+                                  : server->height_;
+             std::string sess_id;
+             unsigned int sb_size =
+                 args.contains("scrollback_size")
+                     ? args["scrollback_size"].get<unsigned int>()
+                     : 200;
+             bool disable_alt =
+                 args.contains("disable_alternate_screen")
+                     ? args["disable_alternate_screen"].get<bool>()
+                     : false;
+             std::string term = args.contains("terminal")
+                                    ? args["terminal"].get<std::string>()
+                                    : server->term_type_;
+             std::string resolved_term = ResolveTerminalType(term);
+             std::string warning;
+             if (!IsKnownTerminalType(resolved_term)) {
+                 warning =
+                     "Terminal type '" + resolved_term +
+                     "' is not in the set of known-good terminal types. "
+                     "The session will use it as-is, but the DUT may fail "
+                     "if the corresponding terminfo entry is not installed "
+                     "on the host.";
+             }
+             std::string loc = args.contains("locale")
+                                   ? args["locale"].get<std::string>()
+                                   : server->locale_;
+             std::shared_ptr<termobulator::unstable::Terminal> term_obj =
+                 CreateSubprocessTerminal(w, h, binary, cmd_args,
+                                          resolved_term, loc, sb_size);
+             term_obj->SetDisableAlternateScreen(disable_alt);
 
-              {
-                  std::lock_guard<std::mutex> lock(server->sessions_mutex_);
-                  if (args.contains("session_id")) {
-                      sess_id = args["session_id"].get<std::string>();
-                      if (server->sessions_.count(sess_id) > 0) {
-                          throw std::runtime_error(
-                              "Session ID already exists: " + sess_id);
-                      }
-                  } else {
-                      sess_id = "session_" +
-                                std::to_string(server->next_session_number_++);
-                      while (server->sessions_.count(sess_id) > 0) {
-                          sess_id =
-                              "session_" +
-                              std::to_string(server->next_session_number_++);
-                      }
-                  }
-                  server->sessions_[sess_id] = std::move(term_obj);
-                  server->sessions_last_activity_[sess_id] =
-                      std::chrono::steady_clock::now();
-                  if (server->first_session_id_.empty()) {
-                      server->first_session_id_ = sess_id;
-                  }
-                  if (server->active_session_id_.empty()) {
-                      server->active_session_id_ = sess_id;
-                  }
-              }
-              json response_json = {{"session_id", sess_id}};
-              return {{"content",
-                       json::array({{{"type", "text"},
-                                     {"text", response_json.dump()}}})}};
-          }},
-         {"close_session",
-          "Terminate and close a terminal session.",
-          {{"session_id",
-            {{"type", "string"},
-             {"description", "The ID of the session to close."}}}},
-          {"session_id"},
-          [](McpServer* server, const json& args) -> json {
-              if (!args.contains("session_id")) {
-                  throw std::runtime_error(
-                      "Missing required parameter: session_id");
-              }
-              std::string sess_id = args.at("session_id").get<std::string>();
-              std::lock_guard<std::mutex> lock(server->sessions_mutex_);
-              if (server->sessions_.count(sess_id) == 0) {
-                  throw std::runtime_error("Session not found: " + sess_id);
-              }
-              server->CloseSessionInternal(sess_id);
-              return {
-                  {"content", json::array({{{"type", "text"},
-                                            {"text", "Session closed."}}})}};
-          }},
-         {"list_sessions",
-          "List all active terminal sessions and their states.",
-          {},
-          {},
-          [](McpServer* server, const json& args) -> json {
-              std::lock_guard<std::mutex> lock(server->sessions_mutex_);
-              json session_list = json::array();
-              for (const auto& pair : server->sessions_) {
-                  json item;
-                  item["session_id"] = pair.first;
-                  item["status"] =
-                      pair.second->IsExited() ? "exited" : "running";
-                  item["exit_code"] = pair.second->ExitStatus();
-                  item["active"] = (pair.first == server->active_session_id_);
-                  session_list.push_back(item);
-              }
-              return {
-                  {"content", json::array({{{"type", "text"},
-                                            {"text", session_list.dump()}}})}};
-          }},
-         {"set_active_session",
-          "Set the default active session for subsequent tool calls.",
-          {{"session_id",
-            {{"type", "string"},
-             {"description", "The ID of the session to activate."}}}},
-          {"session_id"},
-          [](McpServer* server, const json& args) -> json {
-              if (!args.contains("session_id")) {
-                  throw std::runtime_error(
-                      "Missing required parameter: session_id");
-              }
-              std::string sess_id = args.at("session_id").get<std::string>();
-              std::lock_guard<std::mutex> lock(server->sessions_mutex_);
-              if (server->sessions_.count(sess_id) == 0) {
-                  throw std::runtime_error("Session not found: " + sess_id);
-              }
-              server->active_session_id_ = sess_id;
-              server->sessions_last_activity_[sess_id] =
-                  std::chrono::steady_clock::now();
-              return {{"content",
-                       json::array(
-                           {{{"type", "text"},
-                             {"text", "Active session set to " + sess_id}}})}};
-          }},
-         {"execute_dsl",
-          "Execute a series of DSL instructions on the session's persistent "
-          "stack machine to interact with or inspect the terminal. See "
-          "initialize "
-          "instructions for the full language syntax and operators list.",
-          {{"instructions",
-            {{"type", "array"},
-             {"items", json::object()},
-             {"description",
-              "A JSON array of DSL instructions and/or literals, or a "
-              "space-separated string of instructions."}}},
-           {"session_id",
-            {{"type", "string"},
-             {"description",
-              "Optional session ID to target. If omitted, targets the "
-              "currently active session."}}}},
-          {"instructions"},
-          [](McpServer* server, const json& args) -> json {
-              auto interp = server->GetInterpreter(args);
-              json instrs = args.at("instructions");
-              json final_stack;
-              if (instrs.is_string()) {
-                  final_stack = interp->ExecuteText(instrs.get<std::string>());
-              } else if (instrs.is_array()) {
-                  final_stack = interp->Execute(instrs);
-              } else {
-                  throw std::runtime_error(
-                      "instructions must be either a JSON array or a string");
-              }
-              return {{"content",
-                       json::array({{{"type", "text"},
-                                     {"text", final_stack.dump()}}})}};
-          }}};
-return kTools;
+             {
+                 std::lock_guard<std::mutex> lock(server->sessions_mutex_);
+                 if (args.contains("session_id")) {
+                     sess_id = args["session_id"].get<std::string>();
+                     if (server->sessions_.count(sess_id) > 0) {
+                         throw std::runtime_error(
+                             "Session ID already exists: " + sess_id);
+                     }
+                 } else {
+                     sess_id = "session_" +
+                               std::to_string(server->next_session_number_++);
+                     while (server->sessions_.count(sess_id) > 0) {
+                         sess_id =
+                             "session_" +
+                             std::to_string(server->next_session_number_++);
+                     }
+                 }
+                 server->sessions_[sess_id] = std::move(term_obj);
+                 server->sessions_last_activity_[sess_id] =
+                     std::chrono::steady_clock::now();
+                 if (server->first_session_id_.empty()) {
+                     server->first_session_id_ = sess_id;
+                 }
+                 if (server->active_session_id_.empty()) {
+                     server->active_session_id_ = sess_id;
+                 }
+             }
+             json response_json = {{"session_id", sess_id},
+                                   {"terminal", resolved_term}};
+             if (!warning.empty()) {
+                 response_json["warning"] = warning;
+             }
+             return {
+                 {"content", json::array({{{"type", "text"},
+                                           {"text", response_json.dump()}}})}};
+         }},
+        {"close_session",
+         "Terminate and close a terminal session.",
+         {{"session_id",
+           {{"type", "string"},
+            {"description", "The ID of the session to close."}}}},
+         {"session_id"},
+         [](McpServer* server, const json& args) -> json {
+             if (!args.contains("session_id")) {
+                 throw std::runtime_error(
+                     "Missing required parameter: session_id");
+             }
+             std::string sess_id = args.at("session_id").get<std::string>();
+             std::lock_guard<std::mutex> lock(server->sessions_mutex_);
+             if (server->sessions_.count(sess_id) == 0) {
+                 throw std::runtime_error("Session not found: " + sess_id);
+             }
+             server->CloseSessionInternal(sess_id);
+             return {{"content",
+                      json::array(
+                          {{{"type", "text"}, {"text", "Session closed."}}})}};
+         }},
+        {"list_sessions",
+         "List all active terminal sessions and their states.",
+         {},
+         {},
+         [](McpServer* server, const json& args) -> json {
+             std::lock_guard<std::mutex> lock(server->sessions_mutex_);
+             json session_list = json::array();
+             for (const auto& pair : server->sessions_) {
+                 json item;
+                 item["session_id"] = pair.first;
+                 item["status"] =
+                     pair.second->IsExited() ? "exited" : "running";
+                 item["exit_code"] = pair.second->ExitStatus();
+                 item["active"] = (pair.first == server->active_session_id_);
+                 session_list.push_back(item);
+             }
+             return {
+                 {"content", json::array({{{"type", "text"},
+                                           {"text", session_list.dump()}}})}};
+         }},
+        {"set_active_session",
+         "Set the default active session for subsequent tool calls.",
+         {{"session_id",
+           {{"type", "string"},
+            {"description", "The ID of the session to activate."}}}},
+         {"session_id"},
+         [](McpServer* server, const json& args) -> json {
+             if (!args.contains("session_id")) {
+                 throw std::runtime_error(
+                     "Missing required parameter: session_id");
+             }
+             std::string sess_id = args.at("session_id").get<std::string>();
+             std::lock_guard<std::mutex> lock(server->sessions_mutex_);
+             if (server->sessions_.count(sess_id) == 0) {
+                 throw std::runtime_error("Session not found: " + sess_id);
+             }
+             server->active_session_id_ = sess_id;
+             server->sessions_last_activity_[sess_id] =
+                 std::chrono::steady_clock::now();
+             return {{"content",
+                      json::array(
+                          {{{"type", "text"},
+                            {"text", "Active session set to " + sess_id}}})}};
+         }},
+        {"execute_dsl",
+         "Execute a series of DSL instructions on the session's persistent "
+         "stack machine to interact with or inspect the terminal. See "
+         "initialize "
+         "instructions for the full language syntax and operators list.",
+         {{"instructions",
+           {{"type", "array"},
+            {"items", json::object()},
+            {"description",
+             "A JSON array of DSL instructions and/or literals, or a "
+             "space-separated string of instructions."}}},
+          {"session_id",
+           {{"type", "string"},
+            {"description",
+             "Optional session ID to target. If omitted, targets the "
+             "currently active session."}}}},
+         {"instructions"},
+         [](McpServer* server, const json& args) -> json {
+             auto interp = server->GetInterpreter(args);
+             json instrs = args.at("instructions");
+             json final_stack;
+             if (instrs.is_string()) {
+                 final_stack = interp->ExecuteText(instrs.get<std::string>());
+             } else if (instrs.is_array()) {
+                 final_stack = interp->Execute(instrs);
+             } else {
+                 throw std::runtime_error(
+                     "instructions must be either a JSON array or a string");
+             }
+             return {
+                 {"content", json::array({{{"type", "text"},
+                                           {"text", final_stack.dump()}}})}};
+         }}};
+    return kTools;
 }
 
 void McpServer::HandleToolsList(const json& id, const json& req) {
@@ -796,6 +826,37 @@ std::string McpServer::ResolveBinaryPath(const std::string& binary) {
         return abs_path;
     }
     return binary;
+}
+
+void McpServer::HandleResourcesList(const json& id, const json& req) {
+    json resp;
+    resp["jsonrpc"] = "2.0";
+    resp["id"] = id;
+    resp["result"]["resources"] =
+        json::array({{{"uri", "termobulator://docs/terminal-levels"},
+                      {"name", "Terminal Capability Levels"},
+                      {"mimeType", "text/markdown"}}});
+    SendJson(resp);
+}
+
+void McpServer::HandleResourcesRead(const json& id, const json& req) {
+    if (!req.contains("params") || !req["params"].contains("uri")) {
+        SendJsonRpcError(id, -32602, "Invalid params: missing uri");
+        return;
+    }
+    std::string uri = req["params"]["uri"].get<std::string>();
+    if (uri != "termobulator://docs/terminal-levels") {
+        SendJsonRpcError(id, -32002, "Resource not found: " + uri);
+        return;
+    }
+    json resp;
+    resp["jsonrpc"] = "2.0";
+    resp["id"] = id;
+    resp["result"]["contents"] =
+        json::array({{{"uri", uri},
+                      {"mimeType", "text/markdown"},
+                      {"text", GetTerminalLevelsDocumentation()}}});
+    SendJson(resp);
 }
 
 }  // namespace termobulator
