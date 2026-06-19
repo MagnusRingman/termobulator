@@ -163,6 +163,7 @@ void TestPtyTerminalThread() {
                 (void)w3;
             }
         }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
     });
 
     pty_term->WaitIdle(20, 200);
@@ -188,6 +189,9 @@ void TestPtyTerminalThread() {
 
     snap = pty_term->GetSnapshot();
     std::cout << "Screen:\n" << pty_term->DumpScreen() << "\n";
+    std::cout << "CHARACTER AT (1,0): '" << snap.cells[1 * snap.width + 0].ch
+              << "'\n"
+              << std::flush;
     assert(snap.cells[1 * snap.width + 0].ch == "B");
     assert(snap.cells[1 * snap.width + 1].ch == "Y");
     assert(snap.cells[1 * snap.width + 2].ch == "E");
@@ -320,6 +324,135 @@ void TestSubprocessEnv() {
     std::cout << "test_subprocess_env passed\n";
 }
 
+#ifdef HAVE_CURSES
+#include "crash_test_dummy.h"
+
+// Helper function to extract a string from a line in the snapshot
+std::string GetSnapshotLine(const ScreenSnapshot& snap, unsigned int row,
+                            unsigned int start_col, unsigned int length) {
+    std::string s;
+    for (unsigned int c = 0; c < length; ++c) {
+        unsigned int idx = row * snap.width + start_col + c;
+        if (idx < snap.cells.size()) {
+            s += snap.cells[idx].ch;
+        }
+    }
+    return s;
+}
+
+void WaitForExit(
+    const std::unique_ptr<termobulator::unstable::Terminal>& term) {
+    auto start = std::chrono::steady_clock::now();
+    while (!term->IsExited() && std::chrono::steady_clock::now() - start <
+                                    std::chrono::seconds(2)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    assert(term->IsExited());
+}
+
+void TestCrashTestDummyCapability() {
+    auto term = CreateSubprocessTerminal(80, 24, CRASH_TEST_DUMMY_PATH,
+                                         {"--exhibit", "capability"},
+                                         "xterm-256color");
+
+    term->WaitIdle(50, 500);
+    std::cout << "CAPABILITY REPORT SCREEN:\n"
+              << term->DumpScreen() << std::endl;
+    ScreenSnapshot snap = term->GetSnapshot();
+
+    std::string title = GetSnapshotLine(snap, 1, 2, 26);
+    assert(title == "EXHIBIT: Capability Report");
+
+    std::string term_line = GetSnapshotLine(snap, 4, 2, 50);
+    assert(term_line.find("xterm-256color") != std::string::npos);
+
+    std::string max_colors_line = GetSnapshotLine(snap, 8, 2, 35);
+    assert(max_colors_line.find("256") != std::string::npos);
+
+    term->SendRawBytes("q");
+    WaitForExit(term);
+    std::cout << "test_crash_test_dummy_capability passed\n";
+}
+
+void TestCrashTestDummyColors() {
+    {
+        auto term = CreateSubprocessTerminal(80, 24, CRASH_TEST_DUMMY_PATH,
+                                             {"--exhibit", "colors"},
+                                             "xterm-256color");
+
+        term->WaitIdle(50, 500);
+        ScreenSnapshot snap = term->GetSnapshot();
+        std::string title = GetSnapshotLine(snap, 1, 2, 24);
+        assert(title == "EXHIBIT: Color Rendering");
+
+        unsigned int cell_idx = 6 * snap.width + 4;
+        assert(snap.cells[cell_idx].attr.bccode != -1);
+
+        term->SendRawBytes("q");
+        WaitForExit(term);
+    }
+
+    {
+        auto term = CreateSubprocessTerminal(80, 24, CRASH_TEST_DUMMY_PATH,
+                                             {"--exhibit", "colors"}, "vt100");
+
+        term->WaitIdle(50, 500);
+        ScreenSnapshot snap = term->GetSnapshot();
+        std::string fallback = GetSnapshotLine(snap, 4, 4, 21);
+        assert(fallback == "Colors: NOT SUPPORTED");
+
+        term->SendRawBytes("q");
+        WaitForExit(term);
+    }
+
+    std::cout << "test_crash_test_dummy_colors passed\n";
+}
+
+void TestCrashTestDummyAcs() {
+    auto term = CreateSubprocessTerminal(
+        80, 24, CRASH_TEST_DUMMY_PATH, {"--exhibit", "acs"}, "xterm-256color");
+
+    term->WaitIdle(50, 500);
+    ScreenSnapshot snap = term->GetSnapshot();
+    std::string title = GetSnapshotLine(snap, 1, 2, 27);
+    assert(title == "EXHIBIT: Line Drawing / ACS");
+
+    unsigned int ul_idx = 4 * snap.width + 4;
+    assert(snap.cells[ul_idx].ch != " ");
+
+    term->SendRawBytes("q");
+    WaitForExit(term);
+    std::cout << "test_crash_test_dummy_acs passed\n";
+}
+
+void TestCrashTestDummyKeystroke() {
+    auto term =
+        CreateSubprocessTerminal(80, 24, CRASH_TEST_DUMMY_PATH,
+                                 {"--exhibit", "input"}, "xterm-256color");
+
+    term->WaitIdle(50, 500);
+
+    term->SendKey('a');
+    term->WaitIdle(20, 200);
+
+    term->SendKey(0xff52);
+    term->WaitIdle(20, 200);
+
+    ScreenSnapshot snap = term->GetSnapshot();
+
+    term->SendRawBytes("q");
+    WaitForExit(term);
+
+    std::string key1 = GetSnapshotLine(snap, 8, 6, 10);
+    assert(key1.find("'a'") != std::string::npos);
+
+    std::string key2 = GetSnapshotLine(snap, 9, 6, 12);
+    assert(key2.find("KEY_UP") != std::string::npos);
+
+    std::cout << "test_crash_test_dummy_keystroke passed\n";
+}
+#endif
+
 int main() {
     std::cout << "Starting test_basic_rendering...\n" << std::flush;
     TestBasicRendering();
@@ -339,6 +472,19 @@ int main() {
     TestWaitIdleResults();
     std::cout << "Starting test_subprocess_env...\n" << std::flush;
     TestSubprocessEnv();
+
+#ifdef HAVE_CURSES
+    std::cout << "Starting test_crash_test_dummy_capability...\n"
+              << std::flush;
+    TestCrashTestDummyCapability();
+    std::cout << "Starting test_crash_test_dummy_colors...\n" << std::flush;
+    TestCrashTestDummyColors();
+    std::cout << "Starting test_crash_test_dummy_acs...\n" << std::flush;
+    TestCrashTestDummyAcs();
+    std::cout << "Starting test_crash_test_dummy_keystroke...\n" << std::flush;
+    TestCrashTestDummyKeystroke();
+#endif
+
     std::cout << "All Terminal unit tests passed successfully!\n"
               << std::flush;
     return 0;

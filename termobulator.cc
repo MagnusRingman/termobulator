@@ -481,7 +481,9 @@ void TerminalBase::WriteCb(struct tsm_vte *vte, const char *u8, size_t len,
 
 void TerminalBase::SendKey(uint32_t keysym, unsigned int mods) {
     std::lock_guard<std::mutex> lock(mutex_);
-    tsm_vte_handle_keyboard(vte_, keysym, 0, mods, 0);
+    uint32_t ascii = (keysym < 128) ? keysym : 0;
+    uint32_t unicode = (keysym < 0xff00) ? keysym : 0;
+    tsm_vte_handle_keyboard(vte_, keysym, ascii, mods, unicode);
 }
 
 unsigned int TerminalBase::Width() const {

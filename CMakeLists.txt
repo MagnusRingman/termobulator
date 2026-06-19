@@ -61,12 +61,30 @@ target_compile_definitions(libtermobulator PRIVATE
     TERMOBULATOR_TERMINFO_DIR="${TERMINFO_INSTALL_DIR}"
     TERMOBULATOR_BUILD_TERMINFO_DIR="${TERMINFO_BUILD_DIR}"
 )
-
 # Testing Support
 enable_testing()
 
-add_executable(test_terminal tests/test_terminal.cc)
-target_link_libraries(test_terminal PRIVATE libtermobulator Threads::Threads)
+find_package(Curses)
+if(CURSES_FOUND)
+    include_directories(${CURSES_INCLUDE_DIRS})
+    add_library(crash_test_dummy_lib STATIC tests/crash_test_dummy.cc tests/crash_test_dummy.h)
+    target_link_libraries(crash_test_dummy_lib PRIVATE ${CURSES_LIBRARIES})
+
+    add_executable(crash_test_dummy tests/crash_test_dummy_main.cc)
+    target_link_libraries(crash_test_dummy PRIVATE crash_test_dummy_lib ${CURSES_LIBRARIES})
+
+    add_executable(test_terminal tests/test_terminal.cc)
+    target_compile_definitions(test_terminal PRIVATE
+        HAVE_CURSES=1
+        TERMOBULATOR_TERMINFO_DIR="${TERMINFO_INSTALL_DIR}"
+        TERMOBULATOR_BUILD_TERMINFO_DIR="${TERMINFO_BUILD_DIR}"
+        CRASH_TEST_DUMMY_PATH="$<TARGET_FILE:crash_test_dummy>"
+    )
+    target_link_libraries(test_terminal PRIVATE libtermobulator Threads::Threads crash_test_dummy_lib ${CURSES_LIBRARIES})
+else()
+    add_executable(test_terminal tests/test_terminal.cc)
+    target_link_libraries(test_terminal PRIVATE libtermobulator Threads::Threads)
+endif()
 
 add_executable(test_dsl tests/test_dsl.cc dsl_interpreter.cc dsl_interpreter.h app_utils.cc app_utils.h)
 target_link_libraries(test_dsl PRIVATE libtermobulator Threads::Threads nlohmann_json::nlohmann_json)
