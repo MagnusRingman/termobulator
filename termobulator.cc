@@ -18,14 +18,14 @@
 #include <chrono>
 #include <climits>
 #include <condition_variable>
-#include <fstream>
-#include <iostream>
 #include <mutex>
 #include <stdexcept>
 #include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <vector>
+
+#include "termobulator_config.h"
 
 namespace termobulator {
 namespace unstable {
@@ -704,8 +704,9 @@ SubprocessTerminalImpl::SubprocessTerminalImpl(
                     return install_dir;
                 }
             }
-            // 2. Binary-relative: /proc/self/exe ->
-            // ../share/termobulator/terminfo
+            // 2. Binary-relative lookup:
+            //    - ../share/termobulator/terminfo (installed relative)
+            //    - ./terminfo (build tree relative)
             char exe_path[PATH_MAX];
             ssize_t len =
                 readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
@@ -714,23 +715,20 @@ SubprocessTerminalImpl::SubprocessTerminalImpl(
                 std::string dir(exe_path);
                 auto slash = dir.rfind('/');
                 if (slash != std::string::npos) {
-                    std::string candidate = dir.substr(0, slash) +
-                                            "/../share/termobulator/terminfo";
-                    char resolved[PATH_MAX];
-                    if (realpath(candidate.c_str(), resolved) != nullptr) {
-                        struct stat st;
-                        if (stat(resolved, &st) == 0 && S_ISDIR(st.st_mode)) {
-                            return resolved;
+                    std::string dir_path = dir.substr(0, slash);
+                    std::vector<std::string> candidates = {
+                        dir_path + "/../share/termobulator/terminfo",
+                        dir_path + "/terminfo"};
+                    for (const auto &candidate : candidates) {
+                        char resolved[PATH_MAX];
+                        if (realpath(candidate.c_str(), resolved) != nullptr) {
+                            struct stat st;
+                            if (stat(resolved, &st) == 0 &&
+                                S_ISDIR(st.st_mode)) {
+                                return resolved;
+                            }
                         }
                     }
-                }
-            }
-            // 3. Build-tree path (for development runs).
-            const char *build_dir = TERMOBULATOR_BUILD_TERMINFO_DIR;
-            if (build_dir && build_dir[0] != '\0') {
-                struct stat st;
-                if (stat(build_dir, &st) == 0 && S_ISDIR(st.st_mode)) {
-                    return build_dir;
                 }
             }
             return "";

@@ -1,0 +1,9 @@
+CompileFlags:
+  Add: [-I, build]
+
+---
+If:
+  PathMatch: .*\.in$
+
+CompileFlags:
+  Remove: [-*]

@@ -13,7 +13,9 @@
 #include <stdexcept>
 #include <utility>
 
+#include "inlined_docs.h"
 #include "terminal_levels.h"
+#include "termobulator_config.h"
 
 namespace termobulator {
 
@@ -207,104 +209,8 @@ void McpServer::HandleInitialize(const json& id, const json& req) {
     resp["result"]["capabilities"]["tools"] = json::object();
     resp["result"]["capabilities"]["resources"] = json::object();
     resp["result"]["serverInfo"]["name"] = "termobulator";
-    resp["result"]["serverInfo"]["version"] = "1.1.0";
-    resp["result"]["instructions"] =
-        "This server manages terminal sessions and provides tools to interact "
-        "with them.\n"
-        "The `execute_dsl` tool executes a series of instructions on a "
-        "session's persistent stack machine.\n\n"
-        "### DSL Conceptual Model\n"
-        "- **Persistent State**: Each terminal session maintains a stack and "
-        "a variable dictionary between `execute_dsl` calls.\n"
-        "- **Literals**: Values of types integer, boolean, array, and object "
-        "are pushed directly onto the stack.\n"
-        "- **Structured Literals**: Pushing {\"lit\": <value>} directly "
-        "pushes <value> (e.g. {\"lit\": \"f4\"} or {\"lit\": \"\"}) without "
-        "evaluating it or needing escapes.\n"
-        "- **Structured Operations**: Pushing {\"op\": \"<op_name>\", "
-        "\"args\": [<lit_args>...]} evaluates the operation with the given "
-        "literal arguments in order, avoiding stack-shuffling.\n"
-        "- **Escape Prefix**: In a JSON array, prefixing a string with '$' "
-        "(e.g. '$myvar') pushes it as a literal string. In a text string, "
-        "wrap it in double quotes (e.g. \\\"myvar\\\").\n"
-        "- **Operations**: Unprefixed/unquoted strings are executed as "
-        "operations (verbs) that pop arguments and push results.\n"
-        "- **Fail-Fast & Auto-Clear**: Any error (stack underflow, type "
-        "mismatch, invalid operation) aborts execution immediately, returning "
-        "a detailed error message, and automatically clears the stack of the "
-        "session.\n"
-        "- **Opaque Snapshots**: A snapshot is an immutable entity stored in "
-        "the session registry and referenced on the stack as an integer "
-        "snapshot ID.\n\n"
-        "### DSL Available Operations\n"
-        "- `dup` `( x -- x x )`: Duplicate top item.\n"
-        "- `dup2` `( x y -- x y x y )`: Duplicate top two items.\n"
-        "- `drop` `( x -- )`: Discard top item.\n"
-        "- `swap` `( x y -- y x )`: Swap top two items.\n"
-        "- `over` `( x y -- x y x )`: Duplicate second item to top.\n"
-        "- `rot` `( x y z -- y z x )`: Rotate top three items.\n"
-        "- `clear` `( ... -- )`: Discard all stack elements.\n"
-        "- `store` `( val name_str -- )`: Bind value to variable name.\n"
-        "- `load` `( name_str -- val )`: Retrieve value of variable name.\n"
-        "- `exec` `( q -- ... )`: Execute quotation/array `q`.\n"
-        "- `if` `( cond true_q false_q -- ... )`: If cond is non-zero/true "
-        "execute true_q, else false_q.\n"
-        "- `dip` `( x q -- ... x )`: Pop x, execute q, restore x.\n"
-        "- `while` `( cond_q body_q -- ... )`: Loop body_q while cond_q "
-        "returns true/non-zero.\n"
-        "- `not` `( x -- bool )`: Logical negation.\n"
-        "- `equal` `( x y -- bool )`: Check equality.\n"
-        "- `empty` `( val -- bool )`: Check if string/array/object is empty.\n"
-        "- `size` `( val -- int )`: Length of string/array/object.\n"
-        "- `sleep_ms` `( ms_int -- )`: Sleep/delay execution for ms_int "
-        "milliseconds.\n"
-        "- `send_key` `( keys_str -- )`: Send key string (supports escapes "
-        "like \\n, \\t, \\xNN).\n"
-        "- `send_special_key` `( keyname_str modifiers_str -- )`: Send "
-        "special key with comma-separated modifiers (e.g. 'ctrl,alt' or '').\n"
-        "  * **Supported Key Names**: `up`, `down`, `left`, `right`, `f1` to "
-        "`f20`, `backspace`, `tab`, `enter`/`return`, `escape`/`esc`, "
-        "`insert`, `delete`/`del`, `home`, `end`, `pageup`/`pgup`, "
-        "`pagedown`/`pgdn`, `space`, and keypad keys (e.g. `kp_enter`).\n"
-        "  * **Supported Modifiers**: `shift`, `ctrl`/`control`, "
-        "`alt`/`meta`.\n"
-        "- `send_signal` `( sig_int -- )`: Send POSIX signal to child "
-        "process.\n"
-        "- `get_status` `( -- status_str )`: Push status ('running' or "
-        "'exited <code_int>').\n"
-        "- `wait_idle` `( quiet_ms deadline_ms -- result_str )`: Wait for "
-        "terminal to be idle. Pushes 'wait: idle', 'wait: deadline', or "
-        "'wait: exited'.\n"
-        "- `wait_for_text` `( text_str deadline_ms -- result_str )`: Wait for "
-        "text to appear. Pushes 'wait-for-text: found', 'wait-for-text: "
-        "timeout', or 'wait-for-text: exited'.\n"
-        "- `take_snapshot` `( -- snapshot_id )`: Capture screen state, push "
-        "ID.\n"
-        "- `get_screen` `( snapshot_id -- screen_str )`: Get screen text of "
-        "snapshot.\n"
-        "- `get_cursor` `( snapshot_id -- col_int row_int visible_bool )`: "
-        "Push cursor column, row, and visibility.\n"
-        "- `get_cell` `( x_int y_int snapshot_id -- cell_obj )`: Push cell "
-        "JSON object (char, fg, bg, and attributes).\n"
-        "- `get_row` `( row_int snapshot_id -- row_str )`: Push text of "
-        "single row.\n"
-        "- `get_attributes` `( snapshot_id -- attr_list_str )`: Push list of "
-        "unique formatting attributes.\n"
-        "- `find_text` `( query_str snapshot_id -- results_arr )`: Find "
-        "query, push array of `{\"row\": y, \"col_start\": x, \"col_end\": "
-        "x}`.\n"
-        "- `get_diff` `( snapshot_id_b snapshot_id_a -- diff_str )`: Diff "
-        "snapshots, older first. Pushes text summary of difference.\n\n"
-        "### Terminal Capability Levels\n"
-        "The `terminal` parameter on `create_session` controls what terminal "
-        "capabilities the launched application sees. The default is "
-        "`\"full\"` "
-        "(xterm-256color). Use lower levels like `\"basic\"` (vt100) or "
-        "`\"extended\"` (vt220) to test degraded-terminal behaviour. Color "
-        "depth can be controlled independently by appending a suffix: "
-        "`\"full-8color\"`, `\"basic-16color\"`, etc. Read the "
-        "`termobulator://docs/terminal-levels` resource for the full "
-        "reference.";
+    resp["result"]["serverInfo"]["version"] = TERMOBULATOR_VERSION;
+    resp["result"]["instructions"] = termobulator::doc::GetMcpInstructions();
     SendJson(resp);
 }
 
@@ -832,10 +738,30 @@ void McpServer::HandleResourcesList(const json& id, const json& req) {
     json resp;
     resp["jsonrpc"] = "2.0";
     resp["id"] = id;
-    resp["result"]["resources"] =
-        json::array({{{"uri", "termobulator://docs/terminal-levels"},
-                      {"name", "Terminal Capability Levels"},
-                      {"mimeType", "text/markdown"}}});
+
+    json resources = json::array();
+
+    // Add default terminal levels documentation
+    resources.push_back({{"uri", "termobulator://docs/terminal-levels"},
+                         {"name", "Terminal Capability Levels"},
+                         {"mimeType", "text/markdown"}});
+
+    // Add recipes catalog
+    resources.push_back({{"uri", "termobulator://recipes/catalog"},
+                         {"name", "Bootstrapping Recipes Catalog"},
+                         {"mimeType", "text/markdown"}});
+
+    // Add individual recipes
+    for (const auto& recipe : doc::GetRecipes()) {
+        std::string uri =
+            "termobulator://recipes/" + recipe.persona + "/" + recipe.id;
+        resources.push_back({{"uri", uri},
+                             {"name", recipe.title},
+                             {"description", recipe.description},
+                             {"mimeType", "text/markdown"}});
+    }
+
+    resp["result"]["resources"] = resources;
     SendJson(resp);
 }
 
@@ -845,17 +771,68 @@ void McpServer::HandleResourcesRead(const json& id, const json& req) {
         return;
     }
     std::string uri = req["params"]["uri"].get<std::string>();
-    if (uri != "termobulator://docs/terminal-levels") {
+
+    std::string content_text;
+    bool found = false;
+
+    if (uri == "termobulator://docs/terminal-levels") {
+        content_text = GetTerminalLevelsDocumentation();
+        found = true;
+    } else if (uri == "termobulator://recipes/catalog") {
+        std::stringstream ss;
+        ss << "# Termobulator Bootstrapping Recipes Catalog\n\n";
+        ss << "This catalog contains guidelines and recipes to help you "
+              "interact with TUIs effectively.\n\n";
+
+        ss << "## Persona A: Incidental TUI Operators\n";
+        ss << "Guidelines for when a TUI stands between you and your "
+              "task.\n\n";
+        for (const auto& recipe : doc::GetRecipes()) {
+            if (recipe.persona == "incidental") {
+                ss << "* **[" << recipe.title
+                   << "](termobulator://recipes/incidental/" << recipe.id
+                   << ")**\n";
+                ss << "  " << recipe.description << "\n\n";
+            }
+        }
+
+        ss << "## Persona B: TUI Developers & Testers\n";
+        ss << "Guidelines for building and verifying TUI behavior with "
+              "Termobulator.\n\n";
+        for (const auto& recipe : doc::GetRecipes()) {
+            if (recipe.persona == "developer") {
+                ss << "* **[" << recipe.title
+                   << "](termobulator://recipes/developer/" << recipe.id
+                   << ")**\n";
+                ss << "  " << recipe.description << "\n\n";
+            }
+        }
+
+        content_text = ss.str();
+        found = true;
+    } else {
+        for (const auto& recipe : doc::GetRecipes()) {
+            std::string expected_uri =
+                "termobulator://recipes/" + recipe.persona + "/" + recipe.id;
+            if (uri == expected_uri) {
+                content_text = recipe.content;
+                found = true;
+                break;
+            }
+        }
+    }
+
+    if (!found) {
         SendJsonRpcError(id, -32002, "Resource not found: " + uri);
         return;
     }
+
     json resp;
     resp["jsonrpc"] = "2.0";
     resp["id"] = id;
-    resp["result"]["contents"] =
-        json::array({{{"uri", uri},
-                      {"mimeType", "text/markdown"},
-                      {"text", GetTerminalLevelsDocumentation()}}});
+    resp["result"]["contents"] = json::array({{{"uri", uri},
+                                               {"mimeType", "text/markdown"},
+                                               {"text", content_text}}});
     SendJson(resp);
 }
 

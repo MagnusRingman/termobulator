@@ -2,7 +2,7 @@
 # Copyright 2026 The Termobulator Authors.
 
 cmake_minimum_required(VERSION 3.12)
-project(termobulator CXX)
+project(termobulator VERSION 1.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -18,12 +18,27 @@ find_package(nlohmann_json REQUIRED)
 add_library(libtermobulator SHARED termobulator.cc termobulator.h)
 set_target_properties(libtermobulator PROPERTIES
     OUTPUT_NAME termobulator
-    VERSION 1.1.0
+    VERSION ${PROJECT_VERSION}
     SOVERSION 1
 )
 target_link_libraries(libtermobulator PRIVATE tsm Threads::Threads)
+file(GLOB_RECURSE RECIPE_FILES "${CMAKE_CURRENT_SOURCE_DIR}/recipes/*.md")
 
-add_executable(termobulator main.cc app_utils.cc app_utils.h interactive_cli.cc interactive_cli.h mcp_server.cc mcp_server.h dsl_interpreter.cc dsl_interpreter.h terminal_levels.h)
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/inlined_docs.h
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/generate_headers.py
+            ${CMAKE_CURRENT_BINARY_DIR}/inlined_docs.h
+            ${CMAKE_CURRENT_SOURCE_DIR}/inlined-doc/mcp_instructions.md
+            ${CMAKE_CURRENT_SOURCE_DIR}/inlined-doc/terminal_levels.md
+            ${RECIPE_FILES}
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/inlined-doc/mcp_instructions.md
+            ${CMAKE_CURRENT_SOURCE_DIR}/inlined-doc/terminal_levels.md
+            ${CMAKE_CURRENT_SOURCE_DIR}/scripts/generate_headers.py
+            ${RECIPE_FILES}
+    COMMENT "Generating inlined_docs.h from markdown sources"
+)
+
+add_executable(termobulator main.cc app_utils.cc app_utils.h interactive_cli.cc interactive_cli.h mcp_server.cc mcp_server.h dsl_interpreter.cc dsl_interpreter.h terminal_levels.h ${CMAKE_CURRENT_BINARY_DIR}/inlined_docs.h)
 target_link_libraries(termobulator PRIVATE libtermobulator Threads::Threads nlohmann_json::nlohmann_json)
 
 # Bundled terminfo entries
@@ -53,43 +68,32 @@ else()
     set(TERMINFO_BUILD_DIR "")
 endif()
 
-target_compile_definitions(termobulator PRIVATE
-    TERMOBULATOR_TERMINFO_DIR="${TERMINFO_INSTALL_DIR}"
-    TERMOBULATOR_BUILD_TERMINFO_DIR="${TERMINFO_BUILD_DIR}"
-)
-target_compile_definitions(libtermobulator PRIVATE
-    TERMOBULATOR_TERMINFO_DIR="${TERMINFO_INSTALL_DIR}"
-    TERMOBULATOR_BUILD_TERMINFO_DIR="${TERMINFO_BUILD_DIR}"
-)
+configure_file(termobulator_config.h.in termobulator_config.h)
+include_directories(${CMAKE_CURRENT_BINARY_DIR})
+
 # Testing Support
 enable_testing()
 
-find_package(Curses)
-if(CURSES_FOUND)
-    include_directories(${CURSES_INCLUDE_DIRS})
-    add_library(crash_test_dummy_lib STATIC tests/crash_test_dummy.cc tests/crash_test_dummy.h)
-    target_link_libraries(crash_test_dummy_lib PRIVATE ${CURSES_LIBRARIES})
+find_package(Curses REQUIRED)
+include_directories(${CURSES_INCLUDE_DIRS})
 
-    add_executable(crash_test_dummy tests/crash_test_dummy_main.cc)
-    target_link_libraries(crash_test_dummy PRIVATE crash_test_dummy_lib ${CURSES_LIBRARIES})
+add_library(crash_test_dummy_lib STATIC tests/crash_test_dummy.cc tests/crash_test_dummy.h)
+target_link_libraries(crash_test_dummy_lib PRIVATE ${CURSES_LIBRARIES})
 
-    add_executable(test_terminal tests/test_terminal.cc)
-    target_compile_definitions(test_terminal PRIVATE
-        HAVE_CURSES=1
-        TERMOBULATOR_TERMINFO_DIR="${TERMINFO_INSTALL_DIR}"
-        TERMOBULATOR_BUILD_TERMINFO_DIR="${TERMINFO_BUILD_DIR}"
-        CRASH_TEST_DUMMY_PATH="$<TARGET_FILE:crash_test_dummy>"
-    )
-    target_link_libraries(test_terminal PRIVATE libtermobulator Threads::Threads crash_test_dummy_lib ${CURSES_LIBRARIES})
-else()
-    add_executable(test_terminal tests/test_terminal.cc)
-    target_link_libraries(test_terminal PRIVATE libtermobulator Threads::Threads)
-endif()
+add_executable(crash_test_dummy tests/crash_test_dummy_main.cc)
+target_link_libraries(crash_test_dummy PRIVATE crash_test_dummy_lib ${CURSES_LIBRARIES})
+
+add_executable(test_terminal tests/test_terminal.cc)
+target_link_libraries(test_terminal PRIVATE libtermobulator Threads::Threads crash_test_dummy_lib ${CURSES_LIBRARIES})
+
+add_executable(test_recipes tests/test_recipes.cc ${CMAKE_CURRENT_BINARY_DIR}/inlined_docs.h)
+target_link_libraries(test_recipes PRIVATE libtermobulator Threads::Threads crash_test_dummy_lib ${CURSES_LIBRARIES})
 
 add_executable(test_dsl tests/test_dsl.cc dsl_interpreter.cc dsl_interpreter.h app_utils.cc app_utils.h)
 target_link_libraries(test_dsl PRIVATE libtermobulator Threads::Threads nlohmann_json::nlohmann_json)
 
 add_test(NAME unit_test COMMAND test_terminal)
+add_test(NAME recipe_test COMMAND test_recipes)
 add_test(NAME dsl_test COMMAND test_dsl)
 add_test(NAME integration_test COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration_test.py)
 add_test(NAME mcp_integration_test COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mcp.py)
@@ -103,6 +107,8 @@ install(TARGETS termobulator libtermobulator
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 
+install(TARGETS crash_test_dummy RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/termobulator)
+
 install(FILES termobulator.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
 install(EXPORT termobulatorTargets
@@ -114,7 +120,7 @@ install(EXPORT termobulatorTargets
 # CPack Debian Packaging Configuration
 set(CPACK_GENERATOR "DEB")
 set(CPACK_PACKAGE_NAME "termobulator")
-set(CPACK_PACKAGE_VERSION "1.1.0")
+set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Headless terminal emulator driver and testing framework")
 set(CPACK_PACKAGE_VENDOR "Termobulator Authors")
 set(CPACK_PACKAGE_CONTACT "Termobulator Maintainer <termobulator@gmail.com>")

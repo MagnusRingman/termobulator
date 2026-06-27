@@ -324,8 +324,7 @@ void TestSubprocessEnv() {
     std::cout << "test_subprocess_env passed\n";
 }
 
-#ifdef HAVE_CURSES
-#include "crash_test_dummy.h"
+#include <limits.h>
 
 // Helper function to extract a string from a line in the snapshot
 std::string GetSnapshotLine(const ScreenSnapshot& snap, unsigned int row,
@@ -340,6 +339,20 @@ std::string GetSnapshotLine(const ScreenSnapshot& snap, unsigned int row,
     return s;
 }
 
+static std::string GetCrashTestDummyPath() {
+    char exe_path[PATH_MAX];
+    ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+    if (len > 0) {
+        exe_path[len] = '\0';
+        std::string dir(exe_path);
+        auto slash = dir.rfind('/');
+        if (slash != std::string::npos) {
+            return dir.substr(0, slash) + "/crash_test_dummy";
+        }
+    }
+    return "./crash_test_dummy";
+}
+
 void WaitForExit(
     const std::unique_ptr<termobulator::unstable::Terminal>& term) {
     auto start = std::chrono::steady_clock::now();
@@ -351,7 +364,7 @@ void WaitForExit(
 }
 
 void TestCrashTestDummyCapability() {
-    auto term = CreateSubprocessTerminal(80, 24, CRASH_TEST_DUMMY_PATH,
+    auto term = CreateSubprocessTerminal(80, 24, GetCrashTestDummyPath(),
                                          {"--exhibit", "capability"},
                                          "xterm-256color");
 
@@ -376,7 +389,7 @@ void TestCrashTestDummyCapability() {
 
 void TestCrashTestDummyColors() {
     {
-        auto term = CreateSubprocessTerminal(80, 24, CRASH_TEST_DUMMY_PATH,
+        auto term = CreateSubprocessTerminal(80, 24, GetCrashTestDummyPath(),
                                              {"--exhibit", "colors"},
                                              "xterm-256color");
 
@@ -393,7 +406,7 @@ void TestCrashTestDummyColors() {
     }
 
     {
-        auto term = CreateSubprocessTerminal(80, 24, CRASH_TEST_DUMMY_PATH,
+        auto term = CreateSubprocessTerminal(80, 24, GetCrashTestDummyPath(),
                                              {"--exhibit", "colors"}, "vt100");
 
         term->WaitIdle(50, 500);
@@ -409,8 +422,9 @@ void TestCrashTestDummyColors() {
 }
 
 void TestCrashTestDummyAcs() {
-    auto term = CreateSubprocessTerminal(
-        80, 24, CRASH_TEST_DUMMY_PATH, {"--exhibit", "acs"}, "xterm-256color");
+    auto term =
+        CreateSubprocessTerminal(80, 24, GetCrashTestDummyPath(),
+                                 {"--exhibit", "acs"}, "xterm-256color");
 
     term->WaitIdle(50, 500);
     ScreenSnapshot snap = term->GetSnapshot();
@@ -427,7 +441,7 @@ void TestCrashTestDummyAcs() {
 
 void TestCrashTestDummyKeystroke() {
     auto term =
-        CreateSubprocessTerminal(80, 24, CRASH_TEST_DUMMY_PATH,
+        CreateSubprocessTerminal(80, 24, GetCrashTestDummyPath(),
                                  {"--exhibit", "input"}, "xterm-256color");
 
     term->WaitIdle(50, 500);
@@ -451,7 +465,6 @@ void TestCrashTestDummyKeystroke() {
 
     std::cout << "test_crash_test_dummy_keystroke passed\n";
 }
-#endif
 
 int main() {
     std::cout << "Starting test_basic_rendering...\n" << std::flush;
@@ -473,7 +486,6 @@ int main() {
     std::cout << "Starting test_subprocess_env...\n" << std::flush;
     TestSubprocessEnv();
 
-#ifdef HAVE_CURSES
     std::cout << "Starting test_crash_test_dummy_capability...\n"
               << std::flush;
     TestCrashTestDummyCapability();
@@ -483,7 +495,6 @@ int main() {
     TestCrashTestDummyAcs();
     std::cout << "Starting test_crash_test_dummy_keystroke...\n" << std::flush;
     TestCrashTestDummyKeystroke();
-#endif
 
     std::cout << "All Terminal unit tests passed successfully!\n"
               << std::flush;
