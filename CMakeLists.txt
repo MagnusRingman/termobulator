@@ -128,11 +128,15 @@ add_test(NAME mcp_integration_test COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/t
 
 # Installation Rules
 
-install(TARGETS termobulator libtermobulator libtermobulator-testing
+install(TARGETS libtermobulator libtermobulator-testing
     EXPORT termobulatorTargets
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+)
+
+install(TARGETS termobulator
+    EXPORT termobulatorTargets
+    RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/termobulator
 )
 
 install(TARGETS crash_test_dummy RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/termobulator)
@@ -140,9 +144,93 @@ install(TARGETS crash_test_dummy RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}
 install(FILES termobulator.h termobulator_testing.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
 install(EXPORT termobulatorTargets
-    FILE termobulatorTargets.cmake
+    FILE termobulatorConfig.cmake
     NAMESPACE termobulator::
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/termobulator
+)
+
+# Package crash_test_dummy into a tgz archive
+set(STAGING_DIR "${CMAKE_CURRENT_BINARY_DIR}/crash_test_dummy_staging")
+set(PACKAGE_DIR "${STAGING_DIR}/crash_test_dummy")
+
+# Simple CMakeLists.txt content to package
+set(SAMPLE_CMAKE_CONTENT [=[
+cmake_minimum_required(VERSION 3.12)
+project(crash_test_dummy LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+find_package(Threads REQUIRED)
+find_package(Curses REQUIRED)
+
+find_package(GTest QUIET)
+if(NOT GTEST_FOUND AND EXISTS "/usr/src/googletest/CMakeLists.txt")
+    add_subdirectory(/usr/src/googletest build-gtest EXCLUDE_FROM_ALL)
+    if(NOT TARGET GTest::gtest)
+        add_library(GTest::gtest ALIAS gtest)
+    endif()
+    if(NOT TARGET GTest::gmock)
+        add_library(GTest::gmock ALIAS gmock)
+    endif()
+else()
+    find_package(GTest REQUIRED)
+endif()
+
+find_package(termobulator REQUIRED)
+
+add_executable(crash_test_dummy crash_test_dummy.cc)
+target_link_libraries(crash_test_dummy PRIVATE ${CURSES_LIBRARIES})
+
+add_executable(crash_test_dummy_test crash_test_dummy_test.cc)
+target_link_libraries(crash_test_dummy_test PRIVATE
+    termobulator::libtermobulator-testing
+    termobulator::libtermobulator
+    Threads::Threads
+)
+]=])
+
+file(MAKE_DIRECTORY "${PACKAGE_DIR}")
+file(WRITE "${PACKAGE_DIR}/CMakeLists.txt" "${SAMPLE_CMAKE_CONTENT}")
+
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/crash_test_dummy.cc"
+    "${PACKAGE_DIR}/crash_test_dummy.cc"
+    COPYONLY
+)
+
+# For the test, replace relative headers with installed header names
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/tests/crash_test_dummy_test.cc" TEST_SRC)
+string(REPLACE "../termobulator.h" "termobulator.h" TEST_SRC "${TEST_SRC}")
+string(REPLACE "../termobulator_testing.h" "termobulator_testing.h" TEST_SRC "${TEST_SRC}")
+file(WRITE "${PACKAGE_DIR}/crash_test_dummy_test.cc" "${TEST_SRC}")
+
+# Build the archive
+add_custom_command(
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/crash_test_dummy.tgz"
+    COMMAND ${CMAKE_COMMAND} -E tar czf "${CMAKE_CURRENT_BINARY_DIR}/crash_test_dummy.tgz" --format=gnutar "crash_test_dummy"
+    WORKING_DIRECTORY "${STAGING_DIR}"
+    DEPENDS "${PACKAGE_DIR}/CMakeLists.txt"
+            "${PACKAGE_DIR}/crash_test_dummy.cc"
+            "${PACKAGE_DIR}/crash_test_dummy_test.cc"
+    COMMENT "Creating crash_test_dummy.tgz archive"
+)
+
+add_custom_target(crash_test_dummy_archive ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/crash_test_dummy.tgz")
+
+install(
+    FILES "${CMAKE_CURRENT_BINARY_DIR}/crash_test_dummy.tgz"
+    DESTINATION "${CMAKE_INSTALL_DOCDIR}/examples"
+)
+
+install(
+    FILES README.md
+    DESTINATION "${CMAKE_INSTALL_DOCDIR}"
+)
+
+install(
+    FILES termobulator.7
+    DESTINATION "${CMAKE_INSTALL_MANDIR}/man7"
 )
 
 # CPack Debian Packaging Configuration

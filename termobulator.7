@@ -1,0 +1,61 @@
+.TH TERMOBULATOR 7 "2026-06-28" "termobulator 1.3.0" "Termobulator Reference Manual"
+.SH NAME
+termobulator \- Headless terminal emulator driver and testing framework (MCP server)
+.SH DESCRIPTION
+.B termobulator
+is a headless terminal emulator driver and testing framework. It functions primarily as a Model Context Protocol (MCP) server rather than a direct user-runnable program.
+.PP
+For detailed instructions and documentation, refer to the
+.B README.md
+file located at:
+.RS
+.I /usr/share/doc/termobulator/README.md
+.RE
+.SH MCP SERVER CONFIGURATION
+To rig the
+.B termobulator
+binary as an MCP server, you should configure it in your MCP settings file (typically
+.I mcp_config.json
+or similar client configuration). Add the following server configuration entry:
+.PP
+.RS
+.EX
+{
+  "mcpServers": {
+    "termobulator": {
+      "command": "/usr/libexec/termobulator/termobulator",
+      "args": [
+        "--mcp"
+      ]
+    }
+  }
+}
+.EE
+.RE
+.SH LIBRARIES
+The project installs two libraries for integration and testing:
+.TP
+.B libtermobulator
+The core headless terminal emulator library.
+Header:
+.I /usr/include/termobulator.h
+.TP
+.B libtermobulator-testing
+The testing framework extension containing helper APIs and GMock matchers for testing terminal output and interaction.
+Header:
+.I /usr/include/termobulator_testing.h
+.PP
+Developers should read these header files for detailed API definitions and usage instructions.
+.SH EXAMPLES
+A complete example demonstrating how to write tests using the testing library can be found in the
+.B crash_test_dummy.tgz
+archive located at:
+.RS
+.I /usr/share/doc/termobulator/examples/crash_test_dummy.tgz
+.RE
+.PP
+Extract this archive and view the included
+.I CMakeLists.txt
+and
+.I crash_test_dummy_test.cc
+for a working out-of-the-box configuration template.
