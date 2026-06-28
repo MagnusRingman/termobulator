@@ -7,6 +7,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <fstream>
 #include <memory>
 #include <mutex>
@@ -17,7 +18,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "dsl_interpreter.h"
+#include "lua_executor.h"
 #include "termobulator.h"
 
 namespace termobulator {
@@ -58,7 +59,7 @@ class McpServer {
                           const std::string& message);
     std::shared_ptr<termobulator::unstable::Terminal> GetTargetSession(
         const json& args);
-    std::shared_ptr<termobulator::unstable::Interpreter> GetInterpreter(
+    std::shared_ptr<termobulator::unstable::LuaExecutor> GetExecutor(
         const json& args);
     void CloseSessionInternal(const std::string& sess_id);
 
@@ -82,8 +83,8 @@ class McpServer {
                        std::shared_ptr<termobulator::unstable::Terminal>>
         sessions_;
     std::unordered_map<std::string,
-                       std::shared_ptr<termobulator::unstable::Interpreter>>
-        interpreters_;
+                       std::shared_ptr<termobulator::unstable::LuaExecutor>>
+        executors_;
     std::string active_session_id_;
     std::string first_session_id_;
     int first_session_exit_code_ = 0;
@@ -96,6 +97,36 @@ class McpServer {
     std::thread idle_check_thread_;
     std::atomic<bool> stop_idle_check_{false};
     std::condition_variable idle_check_cv_;
+
+    static void RunSessionWatcher(
+        McpServer* server, std::string sess_id,
+        std::shared_ptr<termobulator::unstable::Terminal> term,
+        std::shared_ptr<std::atomic<bool>> stop_flag,
+        std::shared_ptr<std::condition_variable> cv);
+
+    struct FiredEvent {
+        std::string watcher_id;
+        uint64_t fired_at_ms;
+        std::string matched_text;
+    };
+
+    struct PersistentWatcher {
+        std::string watcher_id;
+        std::string type;  // "text" or "pattern"
+        std::string pattern;
+        bool has_fired = false;
+        std::string last_matched_text;
+    };
+
+    struct SessionWatcherState {
+        std::vector<PersistentWatcher> watchers;
+        std::deque<FiredEvent> events;
+        std::shared_ptr<std::thread> watcher_thread;
+        std::shared_ptr<std::atomic<bool>> stop_watcher;
+        std::shared_ptr<std::condition_variable> watcher_cv;
+    };
+
+    std::unordered_map<std::string, SessionWatcherState> session_watchers_;
 
     std::ofstream log_file_;
 };

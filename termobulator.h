@@ -4,6 +4,7 @@
 #ifndef TERMOBULATOR_H
 #define TERMOBULATOR_H
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -80,6 +81,19 @@ struct ScreenSnapshot {
     std::vector<Cell> cells;
 };
 
+struct WatcherDescriptor {
+    enum class Type { kText, kTimeout, kCustom };
+    Type type;
+    std::string text;
+    unsigned int deadline_ms = 0;
+    std::chrono::steady_clock::time_point absolute_deadline;
+    std::function<bool(const ScreenSnapshot &)> predicate;
+};
+
+struct WatchResult {
+    int fired_index;
+};
+
 enum class WaitResult { kIdle, kDeadline, kExited };
 
 class Terminal {
@@ -105,6 +119,8 @@ class Terminal {
     virtual void Resize(unsigned int width, unsigned int height) = 0;
     virtual WaitResult WaitIdle(unsigned int quiet_ms,
                                 unsigned int deadline_ms) = 0;
+    virtual WatchResult WaitAny(
+        const std::vector<WatcherDescriptor> &conditions) = 0;
 
     virtual void SetDisableAlternateScreen(bool disable) = 0;
     virtual std::vector<std::string> GetScrollback(unsigned int lines) = 0;

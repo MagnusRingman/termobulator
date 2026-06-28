@@ -2,7 +2,7 @@
 # Copyright 2026 The Termobulator Authors.
 
 cmake_minimum_required(VERSION 3.12)
-project(termobulator VERSION 1.2.0 LANGUAGES CXX)
+project(termobulator VERSION 1.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -14,14 +14,17 @@ set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
 find_package(Threads REQUIRED)
 find_package(nlohmann_json REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(LUA REQUIRED lua5.4)
+include_directories(${LUA_INCLUDE_DIRS})
 
-add_library(libtermobulator SHARED termobulator.cc termobulator.h)
+add_library(libtermobulator SHARED termobulator.cc termobulator.h app_utils.cc app_utils.h)
 set_target_properties(libtermobulator PROPERTIES
     OUTPUT_NAME termobulator
     VERSION ${PROJECT_VERSION}
     SOVERSION 1
 )
-target_link_libraries(libtermobulator PRIVATE tsm Threads::Threads)
+target_link_libraries(libtermobulator PRIVATE tsm Threads::Threads nlohmann_json::nlohmann_json)
 file(GLOB_RECURSE RECIPE_FILES "${CMAKE_CURRENT_SOURCE_DIR}/recipes/*.md")
 
 add_custom_command(
@@ -38,8 +41,8 @@ add_custom_command(
     COMMENT "Generating inlined_docs.h from markdown sources"
 )
 
-add_executable(termobulator main.cc app_utils.cc app_utils.h interactive_cli.cc interactive_cli.h mcp_server.cc mcp_server.h dsl_interpreter.cc dsl_interpreter.h terminal_levels.h ${CMAKE_CURRENT_BINARY_DIR}/inlined_docs.h)
-target_link_libraries(termobulator PRIVATE libtermobulator Threads::Threads nlohmann_json::nlohmann_json)
+add_executable(termobulator main.cc mcp_server.cc mcp_server.h lua_executor.cc lua_executor.h terminal_levels.h ${CMAKE_CURRENT_BINARY_DIR}/inlined_docs.h)
+target_link_libraries(termobulator PRIVATE libtermobulator Threads::Threads nlohmann_json::nlohmann_json ${LUA_LIBRARIES})
 
 # Bundled terminfo entries
 include(GNUInstallDirs)
@@ -89,13 +92,15 @@ target_link_libraries(test_terminal PRIVATE libtermobulator Threads::Threads cra
 add_executable(test_recipes tests/test_recipes.cc ${CMAKE_CURRENT_BINARY_DIR}/inlined_docs.h)
 target_link_libraries(test_recipes PRIVATE libtermobulator Threads::Threads crash_test_dummy_lib ${CURSES_LIBRARIES})
 
-add_executable(test_dsl tests/test_dsl.cc dsl_interpreter.cc dsl_interpreter.h app_utils.cc app_utils.h)
-target_link_libraries(test_dsl PRIVATE libtermobulator Threads::Threads nlohmann_json::nlohmann_json)
+add_executable(test_lua tests/test_lua.cc lua_executor.cc lua_executor.h)
+target_link_libraries(test_lua PRIVATE libtermobulator Threads::Threads nlohmann_json::nlohmann_json ${LUA_LIBRARIES})
+
+
 
 add_test(NAME unit_test COMMAND test_terminal)
 add_test(NAME recipe_test COMMAND test_recipes)
-add_test(NAME dsl_test COMMAND test_dsl)
-add_test(NAME integration_test COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration_test.py)
+
+add_test(NAME lua_test COMMAND test_lua)
 add_test(NAME mcp_integration_test COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mcp.py)
 
 # Installation Rules

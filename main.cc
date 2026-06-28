@@ -8,7 +8,6 @@
 #include <string>
 #include <vector>
 
-#include "interactive_cli.h"
 #include "mcp_server.h"
 
 int main(int argc, char* argv[]) {
@@ -117,37 +116,24 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    std::string cmd;
-    std::vector<std::string> args;
-
-    if (mcp_mode) {
-        if (arg_idx < argc) {
-            std::cerr << "Error: Target binary and arguments are not allowed "
-                         "in MCP mode.\n";
-            std::cerr
-                << "Usage in MCP mode: " << argv[0]
-                << " [--mcp|-m] [--do_log] [--width <width>] [--height "
-                   "<height>] "
-                   "[--terminal <term>] [--locale <locale>] [--idle-timeout "
-                   "<minutes>] [--idle-timeout-sec <seconds>]\n";
-            return 1;
-        }
-        termobulator::McpServer server(width, height, term_type, locale,
-                                       idle_timeout_sec, do_log);
-        return server.Run();
-    } else {
-        if (arg_idx >= argc) {
-            std::cerr << "Usage: " << argv[0]
-                      << " [--width <width>] [--height <height>] [--terminal "
-                         "<term>] [--locale <locale>] <binary> [args...]\n";
-            return 1;
-        }
-        cmd = argv[arg_idx];
-        for (int i = arg_idx + 1; i < argc; ++i) {
-            args.push_back(argv[i]);
-        }
-        termobulator::InteractiveCli cli(width, height, cmd, args, term_type,
-                                         locale);
-        return cli.Run();
+    if (!mcp_mode) {
+        std::cerr << "Error: Interactive CLI mode is no longer supported.\n"
+                  << "The termobulator binary now only supports MCP mode.\n"
+                  << "Usage: " << argv[0] << " --mcp [options...]\n";
+        return 1;
     }
+
+    if (arg_idx < argc) {
+        std::cerr << "Error: Target binary and arguments are not allowed "
+                     "in MCP mode.\n";
+        std::cerr << "Usage in MCP mode: " << argv[0]
+                  << " [--mcp|-m] [--do_log] [--width <width>] [--height "
+                     "<height>] "
+                     "[--terminal <term>] [--locale <locale>] [--idle-timeout "
+                     "<minutes>] [--idle-timeout-sec <seconds>]\n";
+        return 1;
+    }
+    termobulator::McpServer server(width, height, term_type, locale,
+                                   idle_timeout_sec, do_log);
+    return server.Run();
 }

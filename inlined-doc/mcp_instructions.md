@@ -1,55 +1,75 @@
 # MCP Server Instructions
 
 This server manages terminal sessions and provides tools to interact with them.
-The `execute_dsl` tool executes a series of instructions on a session's persistent stack machine.
+The `execute_dsl` tool executes a Lua 5.4 script on a session's persistent terminal and state.
 
-### DSL Conceptual Model
+## Lua Conceptual Model
 
-- **Persistent State**: Each terminal session maintains a stack and a variable dictionary between `execute_dsl` calls.
-- **Literals**: Values of types integer, boolean, array, and object are pushed directly onto the stack.
-- **Structured Literals**: Pushing `{"lit": value}` directly pushes `value` (e.g. `{"lit": "f4"}` or `{"lit": ""}`) without evaluating it or needing escapes.
-- **Structured Operations**: Pushing `{"op": "op_name", "args": [lit_args...]}` evaluates the operation with the given literal arguments in order, avoiding stack-shuffling.
-- **Escape Prefix**: In a JSON array, prefixing a string with '$' (e.g. '$myvar') pushes it as a literal string. In a text string, wrap it in double quotes (e.g. \"myvar\").
-- **Operations**: Unprefixed/unquoted strings are executed as operations (verbs) that pop arguments and push results.
-- **Fail-Fast & Auto-Clear**: Any error (stack underflow, type mismatch, invalid operation) aborts execution immediately, returning a detailed error message, and automatically clears the stack of the session.
-- **Opaque Snapshots**: A snapshot is an immutable entity stored in the session registry and referenced on the stack as an integer snapshot ID.
+- **Fresh State Per Call**: A new `lua_State` is created for every `execute_dsl` call. Uncaught runtime errors abort execution immediately, leaving the persistent variable store untouched (perfect rollback).
+- **Sandboxed Environment**: To prevent host access, only safe standard libraries are opened: `base`, `string`, `table`, `math`, and `utf8`.
+- **Pruned Globals**: Banned functions like `print`, `warn`, `load`, `loadfile`, `dofile`, `require`, and `collectgarbage` are removed from the global environment. `string.dump` is also removed.
+- **Variable Store (`vars`)**: Variables are persisted across calls by storing them in the global `vars` table (e.g. `vars.counter = (vars.counter or 0) + 1`). Surviving entries are serialized to/from the C++ session store between calls.
+- **JSON Serialization**: Only values that round-trip cleanly to JSON are serialized in `vars` (numbers, strings, booleans, arrays, and tables with string keys). Other types (e.g. functions, userdata) are skipped with a warning logged.
+- **Diagnostic Logging**: The global `log(...)` function accepts any number of arguments, converts them to strings, joins them with tabs, and appends them to a diagnostics log buffer returned to the caller.
+- **Structured Response**: The tool returns a JSON payload containing:
+  - `result`: The value(s) returned by the Lua chunk (0 returns = `null`, 1 return = value, >1 returns = JSON array).
+  - `log`: An array of diagnostic strings collected via `log(...)`.
+  - `variables`: A snapshot of the updated `vars` table.
 
-### DSL Available Operations
+### Global Functions
 
-- `dup` `( x -- x x )`: Duplicate top item.
-- `dup2` `( x y -- x y x y )`: Duplicate top two items.
-- `drop` `( x -- )`: Discard top item.
-- `swap` `( x y -- y x )`: Swap top two items.
-- `over` `( x y -- x y x )`: Duplicate second item to top.
-- `rot` `( x y z -- y z x )`: Rotate top three items.
-- `clear` `( ... -- )`: Discard all stack elements.
-- `store` `( val name_str -- )`: Bind value to variable name.
-- `load` `( name_str -- val )`: Retrieve value of variable name.
-- `exec` `( q -- ... )`: Execute quotation/array `q`.
-- `if` `( cond true_q false_q -- ... )`: If cond is non-zero/true execute true_q, else false_q.
-- `dip` `( x q -- ... x )`: Pop x, execute q, restore x.
-- `while` `( cond_q body_q -- ... )`: Loop body_q while cond_q returns true/non-zero.
-- `not` `( x -- bool )`: Logical negation.
-- `equal` `( x y -- bool )`: Check equality.
-- `empty` `( val -- bool )`: Check if string/array/object is empty.
-- `size` `( val -- int )`: Length of string/array/object.
-- `sleep_ms` `( ms_int -- )`: Sleep/delay execution for ms_int milliseconds.
-- `send_key` `( keys_str -- )`: Send key string (supports escapes like \n, \t, \xNN).
-- `send_special_key` `( keyname_str modifiers_str -- )`: Send special key with comma-separated modifiers (e.g. 'ctrl,alt' or '').
+- `log(...)` `( ... -- )`: Appends formatted string to the diagnostic log buffer.
+
+### Terminal Namespace (`term.*`)
+
+All terminal interactions reside under the global `term` table namespace:
+
+#### Input
+
+- `term.send_key(text)` `( string -- )`: Sends a key sequence to the terminal. Parses escape sequences like `\n`, `\t`, or `\xNN`.
+- `term.send_special_key(name [, mods])` `( string [, string] -- )`: Sends a special key. `mods` is a comma-separated string of modifiers (e.g. `"ctrl,shift"`).
   - **Supported Key Names**: `up`, `down`, `left`, `right`, `f1` to `f20`, `backspace`, `tab`, `enter`/`return`, `escape`/`esc`, `insert`, `delete`/`del`, `home`, `end`, `pageup`/`pgup`, `pagedown`/`pgdn`, `space`, and keypad keys (e.g. `kp_enter`).
   - **Supported Modifiers**: `shift`, `ctrl`/`control`, `alt`/`meta`.
-- `send_signal` `( sig_int -- )`: Send POSIX signal to child process.
-- `get_status` `( -- status_str )`: Push status ('running' or 'exited <code_int>').
-- `wait_idle` `( quiet_ms deadline_ms -- result_str )`: Wait for terminal to be idle. Pushes 'wait: idle', 'wait: deadline', or 'wait: exited'.
-- `wait_for_text` `( text_str deadline_ms -- result_str )`: Wait for text to appear. Pushes 'wait-for-text: found', 'wait-for-text: timeout', or 'wait-for-text: exited'.
-- `take_snapshot` `( -- snapshot_id )`: Capture screen state, push ID.
-- `get_screen` `( snapshot_id -- screen_str )`: Get screen text of snapshot.
-- `get_cursor` `( snapshot_id -- col_int row_int visible_bool )`: Push cursor column, row, and visibility.
-- `get_cell` `( x_int y_int snapshot_id -- cell_obj )`: Push cell JSON object (char, fg, bg, and attributes).
-- `get_row` `( row_int snapshot_id -- row_str )`: Push text of single row.
-- `get_attributes` `( snapshot_id -- attr_list_str )`: Push list of unique formatting attributes.
-- `find_text` `( query_str snapshot_id -- results_arr )`: Find query, push array of `{"row": y, "col_start": x, "col_end": x}`.
-- `get_diff` `( snapshot_id_b snapshot_id_a -- diff_str )`: Diff snapshots, older first. Pushes text summary of difference.
+  - **Note on Modifiers**: Compound keys with modifiers (like `"ctrl,left"`) are delivered as raw escape sequences (e.g. `\e[1;5D` for `Ctrl+Left`) unless explicitly bound by the active terminfo file and keyboard/keypad translation is enabled.
+- `term.send_signal(sig)` `( integer -- )`: Sends a POSIX signal to the child process.
+- `term.sleep_ms(ms)` `( integer -- )`: Blocks script execution for `ms` milliseconds.
+- `term.set_disable_alternate_screen(disable)` `( boolean -- )`: Disables switching to the alternate screen buffer.
+
+#### Waiting
+
+- `term.wait_idle(quiet_ms, deadline_ms)` `( integer, integer -- string )`: Waits for terminal to be idle (no updates for `quiet_ms` or `deadline_ms` elapsed). Returns `"idle"`, `"deadline"`, or `"exited"`.
+- `term.wait_for_text(text, deadline_ms)` `( string, integer -- string )`: Waits for the given text to appear on the screen. Parses escape sequences in `text`. Returns `"found"`, `"timeout"`, or `"exited"`.
+- `term.wait_for_screen_change(baseline_snap_id, deadline_ms)` `( integer, integer -- string )`: Blocks until the screen state differs from the baseline snapshot. Returns `"changed"`, `"timeout"`, or `"exited"`.
+
+#### Watchers & WaitAny
+
+- `term.watch_text(text)` `( string -- userdata )`: Creates a text watcher descriptor. Parses escape sequences.
+- `term.watch_timeout(ms)` `( integer -- userdata )`: Creates a timeout watcher descriptor.
+- `term.watch_pattern(lua_pattern)` `( string -- userdata )`: Creates a watcher that matches using Lua's built-in pattern matching engine.
+- `term.watch_any_text(texts)` `( table -- userdata )`: Creates a custom watcher that matches if any string in the `texts` array is found on the screen.
+- `term.watch_any_pattern(patterns)` `( table -- userdata )`: Creates a custom watcher that matches if any Lua pattern in the `patterns` array is found on the screen.
+- `term.wait_any(w1, w2, ...)` `( userdata... -- userdata | string )`: Blocks until one watcher fires, returning that watcher userdata. If the terminal exits during wait, returns `"exited"`.
+
+#### Queries
+
+- `term.get_status()` `( -- string )`: Returns current status (`"running"` or `"exited <code_int>"`).
+- `term.get_terminal_size()` `( -- integer, integer )`: Returns the terminal width and height.
+- `term.get_keysyms()` `( -- table )`: Returns an array of all registered key name strings.
+- `term.take_snapshot()` `( -- integer )`: Captures the current screen state, returning a snapshot ID.
+- `term.dump_screen([snapshot_id])` `( [integer] -- string )`: Returns formatted text representation of screen (default: current screen / `-1`).
+- `term.dump_screen_html([snapshot_id])` `( [integer] -- string )`: Returns formatted HTML representation of screen with colors and styles preserved (default: current screen / `-1`).
+- `term.get_screen([snapshot_id])` `( [integer] -- string )`: Returns screen text content with trailing whitespace on lines trimmed (default: current / `-1`).
+- `term.get_cursor([snapshot_id])` `( [integer] -- integer, integer, boolean )`: Returns cursor column `x` (0-indexed), row `y` (0-indexed), and visibility.
+- `term.get_cell(x, y [, snapshot_id])` `( integer, integer [, integer] -- table )`: Returns a table describing the cell at `(x, y)`: `{char, fg, bg, bold, italic, underline, inverse, protect, blink}`.
+- `term.get_row(row [, snapshot_id])` `( integer [, integer] -- string )`: Returns the text of a single row with trailing whitespace trimmed.
+- `term.get_rows(start_row, end_row [, snapshot_id])` `( integer, integer [, integer] -- table )`: Fetches a range of rows as an array of strings in a single call.
+- `term.get_attributes([snapshot_id])` `( [integer] -- string )`: Returns a formatted list of unique formatting attributes.
+- `term.find_text(text [, snapshot_id])` `( string [, integer] -- table )`: Searches the screen, returning a list of match coordinates: `{ {row, col_start, col_end}, ... }`.
+- `term.find_pattern(lua_pattern [, snapshot_id])` `( string [, integer] -- table )`: Searches the screen using a Lua pattern, returning a list of match coordinates: `{ {row, col_start, col_end}, ... }`.
+- `term.get_diff(snap_a, snap_b)` `( integer, integer -- string )`: Returns a text summary comparing differences between two snapshot IDs.
+- `term.get_diff_structured(snap_a, snap_b)` `( integer, integer -- table )`: Programmatic diff returning a table of difference objects: `{ {row, col_start, col_end, old, new}, ... }`.
+- `term.get_scrollback(lines)` `( integer -- table )`: Returns an array of the last `lines` of scrollback.
+- `term.resize(width, height)` `( integer, integer -- )`: Resizes the terminal columns and rows.
 
 ### Terminal Capability Levels
 

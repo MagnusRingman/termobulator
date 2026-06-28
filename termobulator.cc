@@ -25,6 +25,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "app_utils.h"
 #include "termobulator_config.h"
 
 namespace termobulator {
@@ -103,6 +104,8 @@ class TerminalBase : public Terminal {
     void Resize(unsigned int width, unsigned int height) override;
     WaitResult WaitIdle(unsigned int quiet_ms,
                         unsigned int deadline_ms) override;
+    WatchResult WaitAny(
+        const std::vector<WatcherDescriptor> &conditions) override;
 
     void SetDisableAlternateScreen(bool disable) override;
     std::vector<std::string> GetScrollback(unsigned int lines) override;
@@ -122,6 +125,7 @@ class TerminalBase : public Terminal {
 
   private:
     ScreenSnapshot CaptureCurrent();
+    bool CheckTextCondition(std::string_view query);
     static std::string RenderSnapshot(const ScreenSnapshot &snap);
     static void WriteCb(struct tsm_vte *vte, const char *u8, size_t len,
                         void *data);
@@ -365,6 +369,83 @@ WaitResult TerminalBase::WaitIdle(unsigned int quiet_ms,
         return WaitResult::kExited;
     }
     return WaitResult::kDeadline;
+}
+
+bool TerminalBase::CheckTextCondition(std::string_view query) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ScreenSnapshot snap = CaptureCurrent();
+    for (unsigned int y = 0; y < snap.height; ++y) {
+        if (app_utils::GetRow(snap, y).find(query) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+WatchResult TerminalBase::WaitAny(
+    const std::vector<WatcherDescriptor> &conditions) {
+    auto check_conditions = [&]() -> int {
+        auto now = std::chrono::steady_clock::now();
+        for (size_t i = 0; i < conditions.size(); ++i) {
+            const auto &cond = conditions[i];
+            if (cond.type == WatcherDescriptor::Type::kText) {
+                if (CheckTextCondition(cond.text)) {
+                    return static_cast<int>(i);
+                }
+            } else if (cond.type == WatcherDescriptor::Type::kTimeout) {
+                if (now >= cond.absolute_deadline) {
+                    return static_cast<int>(i);
+                }
+            } else if (cond.type == WatcherDescriptor::Type::kCustom) {
+                if (cond.predicate && cond.predicate(CaptureCurrent())) {
+                    return static_cast<int>(i);
+                }
+            }
+        }
+        return -2;
+    };
+
+    // Check once before sleep loop
+    int initial_fired = check_conditions();
+    if (initial_fired >= 0) {
+        return WatchResult{initial_fired};
+    }
+    if (IsExited()) {
+        return WatchResult{-1};
+    }
+
+    std::unique_lock<std::mutex> lock(pty_update_mutex_);
+    while (true) {
+        int fired = check_conditions();
+        if (fired >= 0) {
+            return WatchResult{fired};
+        }
+        if (IsExited()) {
+            return WatchResult{-1};
+        }
+
+        auto now = std::chrono::steady_clock::now();
+        bool has_timeout = false;
+        std::chrono::steady_clock::time_point min_deadline;
+        for (const auto &cond : conditions) {
+            if (cond.type == WatcherDescriptor::Type::kTimeout) {
+                if (!has_timeout || cond.absolute_deadline < min_deadline) {
+                    min_deadline = cond.absolute_deadline;
+                    has_timeout = true;
+                }
+            }
+        }
+
+        if (has_timeout) {
+            if (now >= min_deadline) {
+                continue;
+            }
+            auto wait_dur = min_deadline - now;
+            pty_update_cv_.wait_for(lock, wait_dur);
+        } else {
+            pty_update_cv_.wait(lock);
+        }
+    }
 }
 
 int TerminalBase::DrawCb(struct tsm_screen *con, uint64_t id,

@@ -116,7 +116,10 @@ def run_mcp_test():
             "close_session",
             "list_sessions",
             "set_active_session",
-            "execute_dsl"
+            "execute_dsl",
+            "register_watcher",
+            "check_watchers",
+            "await_watchers"
         }, f"Unexpected tool list: {tool_names}"
 
         # Test error when calling execute_dsl without active session
@@ -127,7 +130,7 @@ def run_mcp_test():
             "params": {
                 "name": "execute_dsl",
                 "arguments": {
-                    "instructions": "20 500 wait_idle"
+                    "script": "return term.wait_idle(20, 500)"
                 }
             }
         })
@@ -166,7 +169,7 @@ def run_mcp_test():
             "params": {
                 "name": "execute_dsl",
                 "arguments": {
-                    "instructions": "20 500 wait_idle"
+                    "script": "return term.wait_idle(20, 500)"
                 }
             }
         })
@@ -174,8 +177,8 @@ def run_mcp_test():
         assert resp is not None
         assert resp["id"] == 4
         assert not resp["result"].get("isError", False)
-        stack = json.loads(resp["result"]["content"][0]["text"])
-        assert stack == ["wait: idle"], f"Expected ['wait: idle'], got {stack}"
+        resp_payload = json.loads(resp["result"]["content"][0]["text"])
+        assert resp_payload["result"] == "idle", f"Expected 'idle', got {resp_payload['result']}"
 
         # 6. Call get_screen via DSL
         send_msg({
@@ -185,7 +188,7 @@ def run_mcp_test():
             "params": {
                 "name": "execute_dsl",
                 "arguments": {
-                    "instructions": "clear -1 get_screen"
+                    "script": "return term.get_screen(-1)"
                 }
             }
         })
@@ -193,9 +196,8 @@ def run_mcp_test():
         assert resp is not None
         assert resp["id"] == 5
         assert not resp["result"].get("isError", False)
-        stack = json.loads(resp["result"]["content"][0]["text"])
-        assert len(stack) == 1
-        screen_str = stack[0]
+        resp_payload = json.loads(resp["result"]["content"][0]["text"])
+        screen_str = resp_payload["result"]
         assert screen_str.startswith("READY"), f"Expected screen to start with READY, got: {screen_str[:20]}"
 
         # 7. Take a snapshot via DSL
@@ -206,7 +208,7 @@ def run_mcp_test():
             "params": {
                 "name": "execute_dsl",
                 "arguments": {
-                    "instructions": "clear take_snapshot"
+                    "script": "return term.take_snapshot()"
                 }
             }
         })
@@ -214,8 +216,8 @@ def run_mcp_test():
         assert resp is not None
         assert resp["id"] == 6
         assert not resp["result"].get("isError", False)
-        stack = json.loads(resp["result"]["content"][0]["text"])
-        assert stack == [0], f"Expected snapshot ID 0, got {stack}"
+        resp_payload = json.loads(resp["result"]["content"][0]["text"])
+        assert resp_payload["result"] == 0, f"Expected snapshot ID 0, got {resp_payload['result']}"
 
         # Test parameter validation: missing required parameter instructions in execute_dsl
         send_msg({
@@ -232,7 +234,7 @@ def run_mcp_test():
         assert resp["id"] == 21
         assert resp["result"].get("isError") is True
         err_text = resp["result"]["content"][0]["text"]
-        assert "Missing required parameter" in err_text or "instructions" in err_text, f"Expected validation error, got: {err_text}"
+        assert "Missing required parameter" in err_text or "script" in err_text, f"Expected validation error, got: {err_text}"
 
         # Test get_cursor via DSL (returns [cursor_x, cursor_y, visible])
         send_msg({
@@ -242,19 +244,19 @@ def run_mcp_test():
             "params": {
                 "name": "execute_dsl",
                 "arguments": {
-                    "instructions": "clear -1 get_cursor"
+                    "script": "return term.get_cursor(-1)"
                 }
             }
         })
         resp = read_msg()
         assert resp is not None
         assert resp["id"] == 22
-        stack = json.loads(resp["result"]["content"][0]["text"])
-        assert len(stack) == 3
-        # stack is [cursor_x, cursor_y, visible]
-        assert isinstance(stack[0], int)
-        assert isinstance(stack[1], int)
-        assert isinstance(stack[2], bool)
+        resp_payload = json.loads(resp["result"]["content"][0]["text"])
+        cursor_res = resp_payload["result"]
+        assert len(cursor_res) == 3
+        assert isinstance(cursor_res[0], int)
+        assert isinstance(cursor_res[1], int)
+        assert isinstance(cursor_res[2], bool)
 
         # Test get_cell via DSL
         send_msg({
@@ -264,16 +266,15 @@ def run_mcp_test():
             "params": {
                 "name": "execute_dsl",
                 "arguments": {
-                    "instructions": "clear 0 0 -1 get_cell"
+                    "script": "return term.get_cell(0, 0, -1)"
                 }
             }
         })
         resp = read_msg()
         assert resp is not None
         assert resp["id"] == 23
-        stack = json.loads(resp["result"]["content"][0]["text"])
-        assert len(stack) == 1
-        cell_data = stack[0]
+        resp_payload = json.loads(resp["result"]["content"][0]["text"])
+        cell_data = resp_payload["result"]
         assert "char" in cell_data
         assert "fg" in cell_data
         assert "bg" in cell_data
@@ -286,16 +287,15 @@ def run_mcp_test():
             "params": {
                 "name": "execute_dsl",
                 "arguments": {
-                    "instructions": "clear 0 -1 get_row"
+                    "script": "return term.get_row(0, -1)"
                 }
             }
         })
         resp = read_msg()
         assert resp is not None
         assert resp["id"] == 24
-        stack = json.loads(resp["result"]["content"][0]["text"])
-        assert len(stack) == 1
-        row_text = stack[0]
+        resp_payload = json.loads(resp["result"]["content"][0]["text"])
+        row_text = resp_payload["result"]
         assert row_text.startswith("READY"), f"Expected row 0 to start with READY, got: {row_text}"
 
         # Test find_text via DSL
@@ -306,16 +306,15 @@ def run_mcp_test():
             "params": {
                 "name": "execute_dsl",
                 "arguments": {
-                    "instructions": "clear \"READY\" -1 find_text"
+                    "script": "return term.find_text('READY', -1)"
                 }
             }
         })
         resp = read_msg()
         assert resp is not None
         assert resp["id"] == 25
-        stack = json.loads(resp["result"]["content"][0]["text"])
-        assert len(stack) == 1
-        find_data = stack[0]
+        resp_payload = json.loads(resp["result"]["content"][0]["text"])
+        find_data = resp_payload["result"]
         assert len(find_data) > 0
         assert find_data[0]["row"] == 0
         assert find_data[0]["col_start"] == 0
@@ -383,16 +382,15 @@ def run_mcp_test():
                 "name": "execute_dsl",
                 "arguments": {
                     "session_id": "session_2",
-                    "instructions": "20 500 wait_idle clear -1 get_screen"
+                    "script": "term.wait_idle(20, 500); return term.get_screen(-1)"
                 }
             }
         })
         resp = read_msg()
         assert resp is not None
         assert resp["id"] == 33
-        stack = json.loads(resp["result"]["content"][0]["text"])
-        assert len(stack) == 1
-        screen2 = stack[0]
+        resp_payload = json.loads(resp["result"]["content"][0]["text"])
+        screen2 = resp_payload["result"]
         assert "hello_from_session_2" in screen2, f"Expected hello_from_session_2, got: {screen2}"
 
         # 14. Activate session_2 and run execute_dsl without session_id (should target session_2)
@@ -419,16 +417,15 @@ def run_mcp_test():
             "params": {
                 "name": "execute_dsl",
                 "arguments": {
-                    "instructions": "clear -1 get_screen"
+                    "script": "return term.get_screen(-1)"
                 }
             }
         })
         resp = read_msg()
         assert resp is not None
         assert resp["id"] == 35
-        stack = json.loads(resp["result"]["content"][0]["text"])
-        assert len(stack) == 1
-        screen2_default = stack[0]
+        resp_payload = json.loads(resp["result"]["content"][0]["text"])
+        screen2_default = resp_payload["result"]
         assert "hello_from_session_2" in screen2_default
 
         # 15. Close session_2
@@ -493,16 +490,15 @@ def run_mcp_test():
                 "name": "execute_dsl",
                 "arguments": {
                     "session_id": "session_custom_env",
-                    "instructions": "20 500 wait_idle clear -1 get_screen"
+                    "script": "term.wait_idle(20, 500); return term.get_screen(-1)"
                 }
             }
         })
         resp = read_msg()
         assert resp is not None
         assert resp["id"] == 52
-        stack = json.loads(resp["result"]["content"][0]["text"])
-        assert len(stack) == 1
-        screen_custom = stack[0]
+        resp_payload = json.loads(resp["result"]["content"][0]["text"])
+        screen_custom = resp_payload["result"]
         assert "TERM=custom-terminal-123" in screen_custom, f"Expected custom terminal env, got: {screen_custom}"
         assert "LANG=en_GB.UTF-8" in screen_custom, f"Expected custom locale env, got: {screen_custom}"
 
@@ -545,7 +541,7 @@ def run_mcp_test():
             "params": {
                 "name": "execute_dsl",
                 "arguments": {
-                    "instructions": "clear \"q\\n\" send_key"
+                    "script": "term.send_key('q\\n')"
                 }
             }
         })
@@ -561,14 +557,15 @@ def run_mcp_test():
             "params": {
                 "name": "execute_dsl",
                 "arguments": {
-                    "instructions": "clear 100 1000 wait_idle"
+                    "script": "return term.wait_idle(100, 1000)"
                 }
             }
         })
         resp = read_msg()
         assert resp is not None
-        stack = json.loads(resp["result"]["content"][0]["text"])
-        assert stack == ["wait: exited"], f"Expected ['wait: exited'], got {stack}"
+        resp_payload = json.loads(resp["result"]["content"][0]["text"])
+        res_val = resp_payload["result"]
+        assert res_val == "exited", f"Expected 'exited', got {res_val}"
 
         # 10. Check status via DSL
         send_msg({
@@ -578,14 +575,15 @@ def run_mcp_test():
             "params": {
                 "name": "execute_dsl",
                 "arguments": {
-                    "instructions": "clear get_status"
+                    "script": "return term.get_status()"
                 }
             }
         })
         resp = read_msg()
         assert resp is not None
-        stack = json.loads(resp["result"]["content"][0]["text"])
-        assert stack == ["exited 0"], f"Expected ['exited 0'], got {stack}"
+        resp_payload = json.loads(resp["result"]["content"][0]["text"])
+        res_val = resp_payload["result"]
+        assert res_val == "exited 0", f"Expected 'exited 0', got {res_val}"
 
         # Create a session to test DSL operations
         send_msg({
@@ -607,7 +605,7 @@ def run_mcp_test():
         assert not resp["result"].get("isError", False)
 
         # Test execute_dsl tool
-        # 1. Basic stack operations with list parameters
+        # 1. Basic evaluation
         send_msg({
             "jsonrpc": "2.0",
             "id": 401,
@@ -616,17 +614,17 @@ def run_mcp_test():
                 "name": "execute_dsl",
                 "arguments": {
                     "session_id": "sb_test",
-                    "instructions": [123, "dup"]
+                    "script": "return 123"
                 }
             }
         })
         resp = read_msg()
         assert resp is not None
         assert not resp["result"].get("isError", False)
-        stack_res = json.loads(resp["result"]["content"][0]["text"])
-        assert stack_res == [123, 123], f"Expected [123, 123], got {stack_res}"
+        resp_payload = json.loads(resp["result"]["content"][0]["text"])
+        assert resp_payload["result"] == 123, f"Expected 123, got {resp_payload['result']}"
 
-        # 2. String commands & Persistence: store a variable in one call, load in next
+        # 2. Variable Persistence: store a variable in one call, load in next
         send_msg({
             "jsonrpc": "2.0",
             "id": 402,
@@ -635,15 +633,15 @@ def run_mcp_test():
                 "name": "execute_dsl",
                 "arguments": {
                     "session_id": "sb_test",
-                    "instructions": "clear 999 \"var_mcp\" store"
+                    "script": "vars.var_mcp = 999"
                 }
             }
         })
         resp = read_msg()
         assert resp is not None
         assert not resp["result"].get("isError", False)
-        stack_res = json.loads(resp["result"]["content"][0]["text"])
-        assert stack_res == [], f"Expected empty stack, got {stack_res}"
+        resp_payload = json.loads(resp["result"]["content"][0]["text"])
+        assert resp_payload["variables"] == {"var_mcp": 999}
 
         send_msg({
             "jsonrpc": "2.0",
@@ -653,17 +651,17 @@ def run_mcp_test():
                 "name": "execute_dsl",
                 "arguments": {
                     "session_id": "sb_test",
-                    "instructions": "\"var_mcp\" load"
+                    "script": "return vars.var_mcp"
                 }
             }
         })
         resp = read_msg()
         assert resp is not None
         assert not resp["result"].get("isError", False)
-        stack_res = json.loads(resp["result"]["content"][0]["text"])
-        assert stack_res == [999], f"Expected stack to preserve variable across calls and contain [999], got {stack_res}"
+        resp_payload = json.loads(resp["result"]["content"][0]["text"])
+        assert resp_payload["result"] == 999, f"Expected 999, got {resp_payload['result']}"
 
-        # Test structured literals
+        # Test structured return values (multiple returns)
         send_msg({
             "jsonrpc": "2.0",
             "id": 410,
@@ -672,17 +670,17 @@ def run_mcp_test():
                 "name": "execute_dsl",
                 "arguments": {
                     "session_id": "sb_test",
-                    "instructions": ["clear", {"lit": "hello_structured"}, {"lit": ""}]
+                    "script": "return 'hello_structured', ''"
                 }
             }
         })
         resp = read_msg()
         assert resp is not None
         assert not resp["result"].get("isError", False)
-        stack_res = json.loads(resp["result"]["content"][0]["text"])
-        assert stack_res == ["hello_structured", ""], f"Expected ['hello_structured', ''], got {stack_res}"
+        resp_payload = json.loads(resp["result"]["content"][0]["text"])
+        assert resp_payload["result"] == ["hello_structured", ""], f"Expected ['hello_structured', ''], got {resp_payload['result']}"
 
-        # Test structured operations
+        # Test another structured array check
         send_msg({
             "jsonrpc": "2.0",
             "id": 411,
@@ -691,17 +689,17 @@ def run_mcp_test():
                 "name": "execute_dsl",
                 "arguments": {
                     "session_id": "sb_test",
-                    "instructions": ["clear", {"op": "dup", "args": [88]}]
+                    "script": "return {88, 88}"
                 }
             }
         })
         resp = read_msg()
         assert resp is not None
         assert not resp["result"].get("isError", False)
-        stack_res = json.loads(resp["result"]["content"][0]["text"])
-        assert stack_res == [88, 88], f"Expected [88, 88], got {stack_res}"
+        resp_payload = json.loads(resp["result"]["content"][0]["text"])
+        assert resp_payload["result"] == [88, 88], f"Expected [88, 88], got {resp_payload['result']}"
 
-        # Test error diagnostics and auto-clearing
+        # Test error diagnostics (syntax error)
         send_msg({
             "jsonrpc": "2.0",
             "id": 412,
@@ -710,18 +708,17 @@ def run_mcp_test():
                 "name": "execute_dsl",
                 "arguments": {
                     "session_id": "sb_test",
-                    "instructions": ["clear", 10, 20, "drop", "drop", "drop"]
+                    "script": "1 +"
                 }
             }
         })
         resp = read_msg()
         assert resp is not None
+        assert resp["result"].get("isError") is True
         err_msg = resp["result"]["content"][0]["text"]
-        assert "failed at instruction 5" in err_msg, f"Expected error at instruction 5, got message: {err_msg}"
-        assert "drop" in err_msg
-        assert "Stack at failure" in err_msg
+        assert "syntax error" in err_msg or "near" in err_msg or "unexpected" in err_msg
 
-        # Verify stack was auto-cleared after the error
+        # Verify empty script doesn't error
         send_msg({
             "jsonrpc": "2.0",
             "id": 413,
@@ -730,15 +727,15 @@ def run_mcp_test():
                 "name": "execute_dsl",
                 "arguments": {
                     "session_id": "sb_test",
-                    "instructions": []
+                    "script": ""
                 }
             }
         })
         resp = read_msg()
         assert resp is not None
         assert not resp["result"].get("isError", False)
-        stack_res = json.loads(resp["result"]["content"][0]["text"])
-        assert stack_res == [], f"Expected empty stack after auto-clearing, got {stack_res}"
+        resp_payload = json.loads(resp["result"]["content"][0]["text"])
+        assert resp_payload["result"] is None
 
         # Test sleep_ms
         import time
@@ -751,7 +748,7 @@ def run_mcp_test():
                 "name": "execute_dsl",
                 "arguments": {
                     "session_id": "sb_test",
-                    "instructions": [150, "sleep_ms"]
+                    "script": "term.sleep_ms(150)"
                 }
             }
         })
@@ -760,6 +757,88 @@ def run_mcp_test():
         assert not resp["result"].get("isError", False)
         duration = time.time() - start_time
         assert duration >= 0.14, f"Expected sleep to take at least 150ms, took {duration}s"
+
+        # Test persistent watchers
+        # 1. Register a text watcher
+        send_msg({
+            "jsonrpc": "2.0",
+            "id": 450,
+            "method": "tools/call",
+            "params": {
+                "name": "register_watcher",
+                "arguments": {
+                    "session_id": "sb_test",
+                    "watcher_id": "seq_watch",
+                    "condition": {
+                        "type": "pattern",
+                        "pattern": "%d+"
+                    }
+                }
+            }
+        })
+        resp = read_msg()
+        assert resp is not None
+        assert not resp["result"].get("isError", False)
+
+        # 2. Check watchers (non-blocking poll)
+        # Since 'seq' outputs integers, it should fire immediately
+        time.sleep(0.5)
+        send_msg({
+            "jsonrpc": "2.0",
+            "id": 451,
+            "method": "tools/call",
+            "params": {
+                "name": "check_watchers",
+                "arguments": {
+                    "session_id": "sb_test"
+                }
+            }
+        })
+        resp = read_msg()
+        assert resp is not None
+        assert not resp["result"].get("isError", False)
+        events = json.loads(resp["result"]["content"][0]["text"])
+        assert len(events) > 0
+        assert events[0]["watcher_id"] == "seq_watch"
+        assert events[0]["matched_text"].isdigit()
+
+        # 3. await_watchers (blocking wait)
+        send_msg({
+            "jsonrpc": "2.0",
+            "id": 452,
+            "method": "tools/call",
+            "params": {
+                "name": "register_watcher",
+                "arguments": {
+                    "session_id": "sb_test",
+                    "watcher_id": "timeout_watch",
+                    "condition": {
+                        "type": "text",
+                        "pattern": "NEVER_EXISTS"
+                    }
+                }
+            }
+        })
+        resp = read_msg()
+        assert resp is not None
+
+        send_msg({
+            "jsonrpc": "2.0",
+            "id": 453,
+            "method": "tools/call",
+            "params": {
+                "name": "await_watchers",
+                "arguments": {
+                    "session_id": "sb_test",
+                    "timeout_ms": 100,
+                    "watcher_ids": ["timeout_watch"]
+                }
+            }
+        })
+        resp = read_msg()
+        assert resp is not None
+        events = json.loads(resp["result"]["content"][0]["text"])
+        assert len(events) == 0, f"Expected 0 events on timeout, got {events}"
 
         # Terminate termobulator
         proc.stdin.close()
@@ -1267,10 +1346,11 @@ def run_terminal_levels_test():
         send_msg({"jsonrpc": "2.0", "id": msg_id + 1000, "method": "tools/call",
                   "params": {"name": "execute_dsl",
                              "arguments": {"session_id": f"sess_{msg_id}",
-                                           "instructions": "20 500 wait_idle clear -1 get_screen"}}})
+                                           "script": "term.wait_idle(20, 500); return term.get_screen(-1)"}}})
         resp2 = read_msg()
         assert resp2 is not None
-        screen = json.loads(resp2["result"]["content"][0]["text"])[0]
+        resp_payload = json.loads(resp2["result"]["content"][0]["text"])
+        screen = resp_payload["result"]
         assert f"TERM={expected_terminfo}" in screen, \
             f"Expected TERM={expected_terminfo} in screen, got: {screen!r}"
 
@@ -1362,9 +1442,10 @@ def run_terminal_levels_test():
         send_msg({"jsonrpc": "2.0", "id": 81, "method": "tools/call",
                   "params": {"name": "execute_dsl",
                              "arguments": {"session_id": "sess_default",
-                                           "instructions": "20 500 wait_idle clear -1 get_screen"}}})
+                                           "script": "term.wait_idle(20, 500); return term.get_screen(-1)"}}})
         resp = read_msg()
-        screen = json.loads(resp["result"]["content"][0]["text"])[0]
+        resp_payload = json.loads(resp["result"]["content"][0]["text"])
+        screen = resp_payload["result"]
         assert "TERM=xterm-256color" in screen, \
             f"Expected TERM=xterm-256color, got: {screen!r}"
         send_msg({"jsonrpc": "2.0", "id": 82, "method": "tools/call",

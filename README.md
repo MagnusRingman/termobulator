@@ -1,6 +1,6 @@
 # `termobulator`
 
-A headless terminal emulator designed primarily as a **Model Context Protocol (MCP) server** for AI/LLM agents, with an interactive command-line interface (CLI) for scripting and testing, and a C++ library. Run any TUI program behind it, and programmatically spawn sessions, control input, read screen contents, capture scrollback, and query terminal attributes.
+A headless terminal emulator designed as a **Model Context Protocol (MCP) server** for AI/LLM agents, and a C++ library. Run any TUI program behind it, and programmatically spawn sessions, control input, read screen contents, capture scrollback, and query terminal attributes.
 
 `termobulator` spawns a client (either as a subprocess or inside a dedicated thread) on the slave side of a virtual PTY, feeds its output into a `libtsm`-based terminal state machine on the master side, and exposes an interactive interface. This enables automated headless testing, event playback, assertions, and LLM-agent-driven control of curses/terminal-based interfaces.
 
@@ -19,7 +19,7 @@ cmake --build .
 The CMake build produces:
 
 - `libtermobulator` — shared library (`libtermobulator.so`)
-- `termobulator` — the main command-line driver
+- `termobulator` — the MCP server binary
 
 ---
 
@@ -57,101 +57,28 @@ termobulator --mcp [options]
 | `close_session` | `session_id` (string, req) | Terminate and close a terminal session. |
 | `list_sessions` | None | List all active sessions and their status/exit status. |
 | `set_active_session` | `session_id` (string, req) | Set the default active session for subsequent tool calls. |
-| `execute_dsl` | `instructions` (array/string, req), `session_id` (string, opt) | Execute a series of DSL instructions on the session's persistent stack machine. |
+| `execute_dsl` | `script` (string, req), `session_id` (string, opt) | Execute a sandboxed Lua 5.4 script on the session's persistent terminal and state. |
+| `register_watcher` | `watcher_id` (string, req), `condition` (object, req), `session_id` (string, opt) | Register a persistent watcher on the targeted session. |
+| `check_watchers` | `session_id` (string, opt) | Poll and retrieve any fired watcher events for the targeted session. |
+| `await_watchers` | `timeout_ms` (integer, req), `watcher_ids` (array, opt), `session_id` (string, opt) | Block until a persistent watcher fires on the targeted session. |
 
 ---
 
-## Domain Specific Language (DSL) Specification
+## Lua Scripting & Execution
 
-All terminal interaction and state queries are unified under a stack-based DSL execution engine.
+All terminal interaction, assertions, and state queries are executed via sandboxed Lua 5.4 scripts through the `execute_dsl` tool.
 
-### Conceptual Model
-- **Persistent State**: Each terminal session maintains a stack and a variable dictionary between `execute_dsl` calls.
-- **Literals**: Values of types integer, boolean, array, and object are pushed directly onto the stack.
-  - **JSON Array format**: Prefix a literal string with `$` (e.g. `"$myvar"`) to push it as a literal string.
-  - **Structured Literals**: Pushing `{"lit": <value>}` pushes `<value>` directly onto the stack (e.g. `{"lit": "f4"}`).
-  - **Structured Operations**: Pushing `{"op": "<op_name>", "args": [<args>...]}` executes the operation with the specified arguments in order, avoiding manual stack-shuffling.
-- **Operations**: Unprefixed/unquoted strings are executed as operations (verbs) that pop arguments and push results.
-- **Fail-Fast & Auto-Clear**: Any execution error (stack underflow, type mismatch, invalid operation) aborts execution immediately, returning detailed diagnostics (instruction index, failing token, stack state at failure), and automatically clears the session stack to prevent state pollution.
-- **Opaque Snapshots**: A snapshot is an immutable entity stored in the session registry and referenced on the stack as an integer snapshot ID.
+### Features
 
-### Available Operations
+- **Sandboxed Environment**: Only safe standard Lua libraries (`base`, `string`, `table`, `math`, `utf8`) are loaded.
+- **Global `vars` Table**: Persists across calls. Only values that serialize cleanly to JSON (numbers, strings, booleans, arrays, and string-keyed tables) are preserved.
+- **Global `log(...)`**: Appends diagnostic messages to a log buffer returned to the caller.
+- **Terminal Namespace `term.*`**: Exposes APIs for terminal input (`send_key`, `send_special_key`), state inspection (`dump_screen_html`, `get_cursor`, `get_cell`), and transient/asynchronous waiting (`wait_idle`, `wait_for_text`, `wait_any`).
 
-| Operation | Stack Notation | Description |
-| --- | --- | --- |
-| **Stack Manipulation** | | |
-| `dup` | `( x -- x x )` | Duplicate the top item. |
-| `dup2` | `( x y -- x y x y )` | Duplicate the top two items. |
-| `drop` | `( x -- )` | Discard the top item. |
-| `swap` | `( x y -- y x )` | Swap the top two items. |
-| `over` | `( x y -- x y x )` | Duplicate the second item to the top. |
-| `rot` | `( x y z -- y z x )` | Rotate the top three items. |
-| `clear` | `( ... -- )` | Discard all stack elements. |
-| **Control Flow & Execution** | | |
-| `exec` | `( q -- ... )` | Execute the quotation/array `q`. |
-| `if` | `( cond true_q false_q -- ... )` | If `cond` is non-zero/true, execute `true_q`, else execute `false_q`. |
-| `dip` | `( x q -- ... x )` | Pop `x`, execute `q`, and then restore `x`. |
-| `while` | `( cond_q body_q -- ... )` | Loop `body_q` while `cond_q` returns non-zero/true. |
-| **Dictionary (Variables)** | | |
-| `store` | `( val name_str -- )` | Bind `val` to variable name `name_str`. |
-| `load` | `( name_str -- val )` | Retrieve the value of variable `name_str`. |
-| **Logic, Comparison & Math** | | |
-| `not` | `( x -- bool )` | Logical negation of boolean or number. |
-| `equal` | `( x y -- bool )` | Check equality of top two items. |
-| `empty` | `( val -- bool )` | Check if a string, array, or object is empty. |
-| `size` | `( val -- int )` | Length/size of a string, array, or object. |
-| `+` | `( x y -- sum )` | Integer addition. |
-| `-` | `( x y -- diff )` | Integer subtraction. |
-| **Terminal Interaction** | | |
-| `sleep_ms` | `( ms_int -- )` | Delay execution for `ms_int` milliseconds. |
-| `send_key` | `( keys_str -- )` | Send key/character string (supports escapes like `\n`, `\t`, `\xNN`). |
-| `send_special_key` | `( keyname_str modifiers_str -- )` | Send special key (e.g. `"up"`, `"enter"`) with comma-separated modifiers (e.g. `"ctrl,alt"` or `""`). |
-| `send_signal` | `( sig_int -- )` | Send POSIX signal `sig_int` to the child process. |
-| `get_status` | `( -- status_str )` | Push process status (`"running"` or `"exited <code_int>"`). |
-| `wait_idle` | `( quiet_ms deadline_ms -- result_str )` | Wait for terminal idleness. Pushes `"wait: idle"`, `"wait: deadline"`, or `"wait: exited"`. |
-| `wait_for_text` | `( text_str deadline_ms -- result_str )` | Wait for text to appear on screen. Pushes `"wait-for-text: found"`, `"wait-for-text: timeout"`, or `"wait-for-text: exited"`. |
-| **Snapshots & Queries** | | |
-| `take_snapshot` | `( -- snapshot_id )` | Capture screen state, push integer ID. |
-| `get_screen` | `( snapshot_id -- screen_str )` | Get text representation of a snapshot. |
-| `get_cursor` | `( snapshot_id -- col_int row_int visible_bool )` | Push cursor column, row, and visibility. |
-| `get_cell` | `( x_int y_int snapshot_id -- cell_obj )` | Push cell JSON object (char, fg, bg, and attributes). |
-| `get_row` | `( row_int snapshot_id -- row_str )` | Push row text. |
-| `get_attributes` | `( snapshot_id -- attr_list_str )` | Push unique style attributes summary. |
-| `find_text` | `( query_str snapshot_id -- results_arr )` | Search for `query_str`, push array of `{"row": y, "col_start": x, "col_end": x}`. |
-| `get_diff` | `( snapshot_id_b snapshot_id_a -- diff_str )` | Diff two snapshots, older first. Pushes text diff summary. |
+For the complete Lua scripting model and a full reference of the `term.*` namespace APIs, see [MCP Server Instructions](file:///home/bmr/src/termobulator/inlined-doc/mcp_instructions.md).
 
----
-
-## Command Line Interface (CLI) Mode
-
-If a target binary and arguments are specified at startup without `--mcp`, `termobulator` runs in interactive CLI mode:
-
-```sh
-termobulator [--width <width>] [--height <height>] [--terminal <term>] [--locale <locale>] <binary> [args...]
-```
-
-The driver spawns the target binary inside a default 80×24 PTY, runs a DSL execution loop (REPL) on standard input, and outputs the resulting stack state as a JSON array to stdout.
-
-### CLI Syntax
-- Whitespace separates tokens.
-- `[` and `]`: Form nested quotations/arrays.
-- `"..."`: Parsed as literal strings. Standard backslash escapes (e.g. `\n`, `\t`) are supported.
-- Numeric digits (e.g. `123`, `-5`): Parsed as literal integers.
-- `true` or `false`: Parsed as literal booleans.
-- Unquoted words: Executed as operations.
-- `exit` or `quit`: Exits the CLI REPL.
-
-#### Example Session:
-```
-> 20 200 wait_idle
-["wait: idle"]
-> clear "q\n" send_key
-[]
-> clear get_status
-["exited 0"]
-> exit
-```
-
+> [!CAUTION]
+> Sandboxing is enforced strictly at the Lua language level by disabling standard libraries (like `io`, `os`, and `package`) and pruning dangerous globals. It does not (yet) use OS-level containment (such as `bubblewrap` or `firejail`).
 
 ---
 
@@ -167,6 +94,8 @@ The driver spawns the target binary inside a default 80×24 PTY, runs a DSL exec
 - **`CellAttr`**: Style attributes (foreground/background color codes, RGB, bold, italic, underline, inverse, etc.).
 - **`Cell`**: Contains a UTF-8 character string (`ch`) and its `CellAttr`.
 - **`ScreenSnapshot`**: Saved grid state containing dimension (`width`, `height`), cursor info, and a flat `std::vector<Cell>`.
+- **`WatcherDescriptor`**: Conditions for screen-matching or timing out.
+- **`WatchResult`**: Result containing the index of the triggered watcher.
 
 ### The `Terminal` Interface (`termobulator.h`)
 
@@ -195,6 +124,8 @@ class Terminal {
     virtual void Resize(unsigned int width, unsigned int height) = 0;
     virtual WaitResult WaitIdle(unsigned int quiet_ms,
                                 unsigned int deadline_ms) = 0;
+    virtual WatchResult WaitAny(
+        const std::vector<WatcherDescriptor> &conditions) = 0;
 
     virtual void SetDisableAlternateScreen(bool disable) = 0;
     virtual std::vector<std::string> GetScrollback(unsigned int lines) = 0;

@@ -14,9 +14,9 @@ When you encounter a Terminal User Interface (TUI) for the first time, do not bl
 Always follow this cycle:
 
 1. **Act**: Send a keystroke or command.
-2. **Wait**: Use `wait_idle` to let the application finish rendering.
-3. **Snapshot**: Capture the screen state.
-4. **Inspect**: Read the screen text and cursor position to assess the state.
+2. **Wait**: Use `term.wait_idle` to let the application finish rendering.
+3. **Snapshot**: Capture the screen state using `term.take_snapshot()`.
+4. **Inspect**: Read the screen text via `term.get_screen()` and cursor position via `term.get_cursor()` to assess the state.
 5. **Decide**: Plan your next action based on the visible UI.
 
 ## Step-by-Step Procedure
@@ -49,11 +49,11 @@ Look for a help option on the screen. Common help triggers:
 Once you understand the controls, navigate to the target field or menu:
 
 * Send keys slowly. Do not buffer multiple key sequences unless necessary.
-* Call `wait_idle` after each keypress to ensure the UI updates before you read it.
+* Call `term.wait_idle` after each keypress to ensure the UI updates before you read it.
 
 ### 5. Graceful Exit
 
 Always exit the TUI cleanly. Do not leave orphaned background processes.
 
 * Try standard quit keys: `q`, `Ctrl-C`, `Ctrl-D`, `:q!`, or selecting an "Exit" menu item.
-* Verify the process has exited using `wait_idle` or by checking if the process status is exited.
+* Verify the process has exited using `term.wait_idle` or by checking if the process status is exited using `term.get_status()`.
