@@ -1052,12 +1052,5 @@ std::unique_ptr<Terminal> CreateSubprocessTerminal(
         width, height, cmd, args, term_type, locale, scrollback_size);
 }
 
-std::unique_ptr<Terminal> CreateThreadTerminal(
-    unsigned int width, unsigned int height, std::function<void()> client_func,
-    unsigned int scrollback_size) {
-    return std::make_unique<ThreadTerminalImpl>(width, height, client_func,
-                                                scrollback_size);
-}
-
 }  // namespace unstable
 }  // namespace termobulator

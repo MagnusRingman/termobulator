@@ -77,35 +77,53 @@ include_directories(${CMAKE_CURRENT_BINARY_DIR})
 # Testing Support
 enable_testing()
 
+find_package(GTest QUIET)
+if(NOT GTEST_FOUND AND EXISTS "/usr/src/googletest/CMakeLists.txt")
+    add_subdirectory(/usr/src/googletest build-gtest EXCLUDE_FROM_ALL)
+    if(NOT TARGET GTest::gtest)
+        add_library(GTest::gtest ALIAS gtest)
+    endif()
+    if(NOT TARGET GTest::gmock)
+        add_library(GTest::gmock ALIAS gmock)
+    endif()
+else()
+    find_package(GTest REQUIRED)
+endif()
+
 find_package(Curses REQUIRED)
 include_directories(${CURSES_INCLUDE_DIRS})
 
-add_library(crash_test_dummy_lib STATIC tests/crash_test_dummy.cc tests/crash_test_dummy.h)
-target_link_libraries(crash_test_dummy_lib PRIVATE ${CURSES_LIBRARIES})
+add_library(libtermobulator-testing SHARED termobulator_testing.cc termobulator_testing.h)
+target_link_libraries(libtermobulator-testing PUBLIC libtermobulator GTest::gmock GTest::gtest)
 
-add_executable(crash_test_dummy tests/crash_test_dummy_main.cc)
-target_link_libraries(crash_test_dummy PRIVATE crash_test_dummy_lib ${CURSES_LIBRARIES})
+add_executable(crash_test_dummy tests/crash_test_dummy.cc)
+target_link_libraries(crash_test_dummy PRIVATE ${CURSES_LIBRARIES})
 
 add_executable(test_terminal tests/test_terminal.cc)
-target_link_libraries(test_terminal PRIVATE libtermobulator Threads::Threads crash_test_dummy_lib ${CURSES_LIBRARIES})
+target_link_libraries(test_terminal PRIVATE libtermobulator Threads::Threads)
 
 add_executable(test_recipes tests/test_recipes.cc ${CMAKE_CURRENT_BINARY_DIR}/inlined_docs.h)
-target_link_libraries(test_recipes PRIVATE libtermobulator Threads::Threads crash_test_dummy_lib ${CURSES_LIBRARIES})
+target_link_libraries(test_recipes PRIVATE libtermobulator Threads::Threads)
 
 add_executable(test_lua tests/test_lua.cc lua_executor.cc lua_executor.h)
 target_link_libraries(test_lua PRIVATE libtermobulator Threads::Threads nlohmann_json::nlohmann_json ${LUA_LIBRARIES})
 
+add_executable(test_testing_api tests/test_testing_api.cc)
+target_link_libraries(test_testing_api PRIVATE libtermobulator-testing libtermobulator Threads::Threads)
 
+add_executable(crash_test_dummy_test tests/crash_test_dummy_test.cc)
+target_link_libraries(crash_test_dummy_test PRIVATE libtermobulator-testing libtermobulator Threads::Threads)
 
 add_test(NAME unit_test COMMAND test_terminal)
 add_test(NAME recipe_test COMMAND test_recipes)
-
 add_test(NAME lua_test COMMAND test_lua)
+add_test(NAME testing_api_test COMMAND test_testing_api)
+add_test(NAME crash_test_dummy_test COMMAND crash_test_dummy_test)
 add_test(NAME mcp_integration_test COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mcp.py)
 
 # Installation Rules
 
-install(TARGETS termobulator libtermobulator
+install(TARGETS termobulator libtermobulator libtermobulator-testing
     EXPORT termobulatorTargets
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -114,7 +132,7 @@ install(TARGETS termobulator libtermobulator
 
 install(TARGETS crash_test_dummy RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/termobulator)
 
-install(FILES termobulator.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(FILES termobulator.h termobulator_testing.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
 install(EXPORT termobulatorTargets
     FILE termobulatorTargets.cmake

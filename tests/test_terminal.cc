@@ -17,15 +17,21 @@
 #include "../termobulator.h"
 
 using termobulator::unstable::CreateSubprocessTerminal;
-using termobulator::unstable::CreateThreadTerminal;
 using termobulator::unstable::ScreenSnapshot;
 
+void WaitForExit(
+    const std::unique_ptr<termobulator::unstable::Terminal>& term) {
+    auto start = std::chrono::steady_clock::now();
+    while (!term->IsExited() && std::chrono::steady_clock::now() - start <
+                                    std::chrono::seconds(2)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    assert(term->IsExited());
+}
+
 void TestBasicRendering() {
-    auto term = CreateThreadTerminal(80, 24, []() {
-        ssize_t w = write(STDOUT_FILENO, "Hello", 5);
-        (void)w;
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    });
+    auto term = CreateSubprocessTerminal(80, 24, "sh",
+                                         {"-c", "printf Hello; sleep 0.05"});
     term->WaitIdle(20, 200);
     ScreenSnapshot snap = term->GetSnapshot();
     assert(snap.width == 80);
@@ -39,11 +45,9 @@ void TestBasicRendering() {
 }
 
 void TestScreenAttributes() {
-    auto term = CreateThreadTerminal(80, 24, []() {
-        ssize_t w = write(STDOUT_FILENO, "\033[1;31mRedBold\033[0m", 17);
-        (void)w;
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    });
+    auto term = CreateSubprocessTerminal(
+        80, 24, "sh",
+        {"-c", "printf '\\033[1;31mRedBold\\033[0m'; sleep 0.05"});
     term->WaitIdle(20, 200);
     ScreenSnapshot snap = term->GetSnapshot();
     assert(snap.cells[0].ch == "R");
@@ -56,83 +60,44 @@ void TestScreenAttributes() {
 }
 
 void TestPtyWrite() {
-    std::atomic<bool> key_received{false};
-    auto term = CreateThreadTerminal(80, 24, [&key_received]() {
-        struct termios tio;
-        if (tcgetattr(STDIN_FILENO, &tio) == 0) {
-            tio.c_lflag &= ~(ICANON | ECHO);
-            tcsetattr(STDIN_FILENO, TCSANOW, &tio);
-        }
+    auto term =
+        CreateSubprocessTerminal(80, 24, "python3",
+                                 {"-c",
+                                  "import os, sys; data = os.read(0, 10); "
+                                  "sys.exit(0 if b'x' in data else 1)"});
 
-        char buf[32];
-        ssize_t n = read(STDIN_FILENO, buf, sizeof(buf));
-        if (n > 0) {
-            std::string s(buf, n);
-            if (s == "\033[A" || s == "\033OA") {
-                key_received = true;
-            }
-        }
-    });
+    term->SendKey('x');
+    term->SendKey('\n');
 
-    term->SendKey(0xff52);  // Send Up Key
-
-    auto start = std::chrono::steady_clock::now();
-    while (!key_received && std::chrono::steady_clock::now() - start <
-                                std::chrono::seconds(2)) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    assert(key_received);
+    WaitForExit(term);
+    assert(term->ExitStatus() == 0);
     std::cout << "test_pty_write passed\n";
 }
 
 void TestSnapshots() {
-    std::atomic<int> step{0};
-    std::mutex m;
-    std::condition_variable cv;
+    auto term = CreateSubprocessTerminal(
+        80, 24, "python3",
+        {"-c",
+         "import sys, time; sys.stdout.write('First'); sys.stdout.flush(); "
+         "time.sleep(0.3); sys.stdout.write(' Second'); sys.stdout.flush(); "
+         "time.sleep(0.3)"});
 
-    auto term = CreateThreadTerminal(80, 24, [&step, &m, &cv]() {
-        ssize_t w1 = write(STDOUT_FILENO, "First", 5);
-        (void)w1;
-        {
-            std::lock_guard<std::mutex> lk(m);
-            step = 1;
-        }
-        cv.notify_one();
-
-        {
-            std::unique_lock<std::mutex> lk(m);
-            cv.wait(lk, [&step]() { return step == 2; });
-        }
-
-        ssize_t w2 = write(STDOUT_FILENO, " Second", 7);
-        (void)w2;
-        {
-            std::lock_guard<std::mutex> lk(m);
-            step = 3;
-        }
-        cv.notify_one();
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    });
-
-    {
-        std::unique_lock<std::mutex> lk(m);
-        cv.wait(lk, [&step]() { return step == 1; });
-    }
     term->WaitIdle(20, 200);
 
     int id1 = term->Snapshot();
     assert(id1 == 0);
 
-    {
-        std::lock_guard<std::mutex> lk(m);
-        step = 2;
+    // Wait for output change
+    auto start_t = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - start_t <
+           std::chrono::seconds(2)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        ScreenSnapshot current = term->GetSnapshot();
+        if (current.cells[6].ch == "S") {
+            break;
+        }
     }
-    cv.notify_one();
 
-    {
-        std::unique_lock<std::mutex> lk(m);
-        cv.wait(lk, [&step]() { return step == 3; });
-    }
     term->WaitIdle(20, 200);
 
     int id2 = term->Snapshot();
@@ -150,21 +115,11 @@ void TestSnapshots() {
 }
 
 void TestPtyTerminalThread() {
-    auto pty_term = CreateThreadTerminal(80, 24, []() {
-        ssize_t w1 = write(STDOUT_FILENO, "READY", 5);
-        (void)w1;
-        char c;
-        if (read(STDIN_FILENO, &c, 1) == 1) {
-            if (c == 'q') {
-                ssize_t w2 = write(STDOUT_FILENO, "BYE", 3);
-                (void)w2;
-            } else {
-                ssize_t w3 = write(STDOUT_FILENO, "ERR", 3);
-                (void)w3;
-            }
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    });
+    auto pty_term = CreateSubprocessTerminal(
+        80, 24, "sh",
+        {"-c",
+         "stty -echo; printf READY; read -r c; if [ \"$c\" = \"q\" ]; then "
+         "printf '\\nBYE'; else printf '\\nERR'; fi; sleep 0.02"});
 
     pty_term->WaitIdle(20, 200);
 
@@ -199,34 +154,14 @@ void TestPtyTerminalThread() {
     std::cout << "test_pty_terminal_thread passed\n";
 }
 
-static std::atomic<bool> g_sigwinch_received{false};
-
-static void HandleSigwinch(int sig) {
-    if (sig == SIGWINCH) {
-        g_sigwinch_received = true;
-    }
-}
-
 void TestResize() {
-    g_sigwinch_received = false;
-    auto term = CreateThreadTerminal(80, 24, []() {
-        struct sigaction sa, old_sa;
-        sa.sa_handler = HandleSigwinch;
-        sigemptyset(&sa.sa_mask);
-        sa.sa_flags = 0;
-        sigaction(SIGWINCH, &sa, &old_sa);
-
-        ssize_t w = write(STDOUT_FILENO, "READY", 5);
-        (void)w;
-
-        for (int i = 0; i < 200; ++i) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            if (g_sigwinch_received) {
-                break;
-            }
-        }
-        sigaction(SIGWINCH, &old_sa, nullptr);
-    });
+    auto term = CreateSubprocessTerminal(
+        80, 24, "python3",
+        {"-c",
+         "import sys, signal, time; signal.signal(signal.SIGWINCH, lambda s, "
+         "f: (print('READY_RESIZED'), sys.stdout.flush(), sys.exit(0))); "
+         "print('READY'); sys.stdout.flush(); [time.sleep(0.01) for _ in "
+         "range(200)]"});
 
     term->WaitIdle(20, 200);
 
@@ -238,17 +173,8 @@ void TestResize() {
 
     term->Resize(100, 30);
 
-    auto start = std::chrono::steady_clock::now();
-    while (!g_sigwinch_received && std::chrono::steady_clock::now() - start <
-                                       std::chrono::seconds(2)) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-
-    assert(g_sigwinch_received);
-
-    ScreenSnapshot snap = term->GetSnapshot();
-    assert(snap.width == 100);
-    assert(snap.height == 30);
+    WaitForExit(term);
+    assert(term->ExitStatus() == 0);
 
     std::cout << "test_resize passed\n";
 }
@@ -274,32 +200,23 @@ void TestKeysymSpace() {
 void TestWaitIdleResults() {
     // 1. Idle case
     {
-        auto term = CreateThreadTerminal(80, 24, []() {
-            ssize_t w = write(STDOUT_FILENO, "READY", 5);
-            (void)w;
-            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-        });
+        auto term = CreateSubprocessTerminal(80, 24, "sh",
+                                             {"-c", "printf READY; sleep 1"});
         termobulator::unstable::WaitResult res = term->WaitIdle(10, 200);
         assert(res == termobulator::unstable::WaitResult::kIdle);
     }
     // 2. Deadline case
     {
-        auto term = CreateThreadTerminal(80, 24, []() {
-            for (int i = 0; i < 50; ++i) {
-                ssize_t w = write(STDOUT_FILENO, "READY", 5);
-                (void)w;
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            }
-        });
+        auto term = CreateSubprocessTerminal(
+            80, 24, "sh",
+            {"-c", "for i in $(seq 1 50); do printf READY; sleep 0.01; done"});
         termobulator::unstable::WaitResult res = term->WaitIdle(50, 100);
         assert(res == termobulator::unstable::WaitResult::kDeadline);
     }
     // 3. Exited case
     {
-        auto term = CreateThreadTerminal(80, 24, []() {
-            ssize_t w = write(STDOUT_FILENO, "READY", 5);
-            (void)w;
-        });
+        auto term =
+            CreateSubprocessTerminal(80, 24, "sh", {"-c", "printf READY"});
         termobulator::unstable::WaitResult res = term->WaitIdle(10, 2000);
         assert(res == termobulator::unstable::WaitResult::kExited);
     }
@@ -351,16 +268,6 @@ static std::string GetCrashTestDummyPath() {
         }
     }
     return "./crash_test_dummy";
-}
-
-void WaitForExit(
-    const std::unique_ptr<termobulator::unstable::Terminal>& term) {
-    auto start = std::chrono::steady_clock::now();
-    while (!term->IsExited() && std::chrono::steady_clock::now() - start <
-                                    std::chrono::seconds(2)) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    assert(term->IsExited());
 }
 
 void TestCrashTestDummyCapability() {

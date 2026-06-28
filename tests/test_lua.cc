@@ -15,7 +15,7 @@
 #include "../lua_executor.h"
 #include "../termobulator.h"
 
-using termobulator::unstable::CreateThreadTerminal;
+using termobulator::unstable::CreateSubprocessTerminal;
 using termobulator::unstable::LuaExecutor;
 
 void TestBasic() {
@@ -184,9 +184,7 @@ void TestTypesRoundTrip() {
 }
 
 void TestTerminalOps() {
-    auto term = CreateThreadTerminal(80, 24, []() {
-        std::this_thread::sleep_for(std::chrono::seconds(5));
-    });
+    auto term = CreateSubprocessTerminal(80, 24, "sh", {"-c", "sleep 5"});
 
     LuaExecutor exec(term.get());
 
@@ -217,9 +215,7 @@ void TestTerminalOps() {
 }
 
 void TestWatcherOps() {
-    auto term = CreateThreadTerminal(80, 24, []() {
-        std::this_thread::sleep_for(std::chrono::seconds(5));
-    });
+    auto term = CreateSubprocessTerminal(80, 24, "sh", {"-c", "sleep 5"});
 
     LuaExecutor exec(term.get());
 
@@ -239,7 +235,7 @@ void TestWatcherOps() {
 }
 
 void TestDumpScreenHtml() {
-    auto term = CreateThreadTerminal(10, 5, []() {});
+    auto term = CreateSubprocessTerminal(10, 5, "sh", {"-c", "sleep 5"});
     LuaExecutor exec(term.get());
 
     auto res = exec.Execute("return term.dump_screen_html()");
@@ -252,7 +248,7 @@ void TestDumpScreenHtml() {
 }
 
 void TestVerboseWarnings() {
-    auto term = CreateThreadTerminal(80, 24, []() {});
+    auto term = CreateSubprocessTerminal(80, 24, "sh", {"-c", "sleep 5"});
     LuaExecutor exec(term.get());
 
     auto res = exec.Execute(
@@ -275,22 +271,7 @@ void TestVerboseWarnings() {
 }
 
 void TestNewBindings() {
-    auto stop_echo = std::make_shared<std::atomic<bool>>(false);
-    auto term = CreateThreadTerminal(80, 24, [stop_echo]() {
-        int flags = fcntl(0, F_GETFL, 0);
-        fcntl(0, F_SETFL, flags | O_NONBLOCK);
-        char c;
-        while (!stop_echo->load()) {
-            int n = read(0, &c, 1);
-            if (n > 0) {
-                write(1, &c, 1);
-            } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-                break;
-            } else {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            }
-        }
-    });
+    auto term = CreateSubprocessTerminal(80, 24, "cat", {});
     LuaExecutor exec(term.get());
 
     // test get_terminal_size
@@ -374,8 +355,6 @@ void TestNewBindings() {
         assert(res.result[2].get<std::string>().find("custom") !=
                std::string::npos);
     }
-
-    stop_echo->store(true);
 
     std::cout << "TestNewBindings passed\n";
 }

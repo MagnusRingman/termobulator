@@ -140,10 +140,6 @@ std::unique_ptr<Terminal> CreateSubprocessTerminal(
     const std::string &term_type = "tmux-256color",
     const std::string &locale = "", unsigned int scrollback_size = 200);
 
-std::unique_ptr<Terminal> CreateThreadTerminal(
-    unsigned int width, unsigned int height, std::function<void()> client_func,
-    unsigned int scrollback_size = 200);
-
 }  // namespace unstable
 }  // namespace termobulator
 
