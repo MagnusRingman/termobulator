@@ -908,10 +908,10 @@ int TermWatchPattern(lua_State* L) {
     udata->deadline_ms = 0;
 
     // WARNING: This predicate lambda captures the lua_State* L by value.
-    // This is safe only for in-script waits (e.g. wait_any) since L is guaranteed
-    // to be alive during execution. Storing this WatcherDescriptor in any long-lived,
-    // session-level, or asynchronous context outside this execution call will result
-    // in a dangling pointer when L is closed.
+    // This is safe only for in-script waits (e.g. wait_any) since L is
+    // guaranteed to be alive during execution. Storing this WatcherDescriptor
+    // in any long-lived, session-level, or asynchronous context outside this
+    // execution call will result in a dangling pointer when L is closed.
     udata->predicate = [L, pattern](const ScreenSnapshot& snap) -> bool {
         int top = lua_gettop(L);
         lua_getglobal(L, "string");
@@ -1018,10 +1018,10 @@ int TermWatchAnyPattern(lua_State* L) {
     udata->deadline_ms = 0;
 
     // WARNING: This predicate lambda captures the lua_State* L by value.
-    // This is safe only for in-script waits (e.g. wait_any) since L is guaranteed
-    // to be alive during execution. Storing this WatcherDescriptor in any long-lived,
-    // session-level, or asynchronous context outside this execution call will result
-    // in a dangling pointer when L is closed.
+    // This is safe only for in-script waits (e.g. wait_any) since L is
+    // guaranteed to be alive during execution. Storing this WatcherDescriptor
+    // in any long-lived, session-level, or asynchronous context outside this
+    // execution call will result in a dangling pointer when L is closed.
     udata->predicate = [L, patterns](const ScreenSnapshot& snap) -> bool {
         int top = lua_gettop(L);
         lua_getglobal(L, "string");
