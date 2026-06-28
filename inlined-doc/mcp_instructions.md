@@ -74,3 +74,9 @@ All terminal interactions reside under the global `term` table namespace:
 ### Terminal Capability Levels
 
 The `terminal` parameter on `create_session` controls what terminal capabilities the launched application sees. The default is `"full"` (xterm-256color). Use lower levels like `"basic"` (vt100) or `"extended"` (vt220) to test degraded-terminal behaviour. Color depth can be controlled independently by appending a suffix: `"full-8color"`, `"basic-16color"`, etc. Read the `termobulator://docs/terminal-levels` resource for the full reference.
+
+## C++ Testing Affordances Library
+
+For compile-time C++ unit tests, developers and AI agents should link their test suites against `libtermobulator-testing` (`termobulator::termobulator-testing`). This library provides C++ equivalents for screen/cursor inspection and waiting, plus custom Google Mock matchers like `ScreenContains`, `RowContains`, `ScreenMatchesPattern`, and `HasCursorAt` that print diagnostic screen layouts on mismatch.
+
+Refer to the developer recipe resource `termobulator://recipes/developer/cpp_testing_api` for the complete API reference and integration guidelines.

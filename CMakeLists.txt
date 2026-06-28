@@ -94,6 +94,11 @@ find_package(Curses REQUIRED)
 include_directories(${CURSES_INCLUDE_DIRS})
 
 add_library(libtermobulator-testing SHARED termobulator_testing.cc termobulator_testing.h)
+set_target_properties(libtermobulator-testing PROPERTIES
+    OUTPUT_NAME termobulator-testing
+    VERSION ${PROJECT_VERSION}
+    SOVERSION 1
+)
 target_link_libraries(libtermobulator-testing PUBLIC libtermobulator GTest::gmock GTest::gtest)
 
 add_executable(crash_test_dummy tests/crash_test_dummy.cc)
